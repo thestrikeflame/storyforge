@@ -189,28 +189,39 @@ def _repeats(words: list[str], earlier: list[list[str]]) -> bool:
     return False
 
 
-def drop_repeats(text: str, earlier_pages: list[str]) -> tuple[str, int]:
+def drop_repeats(text: str, earlier_pages: list[str], floor: int = 0,
+                 finished_only: bool = False) -> tuple[str, int]:
     """Drop every finished sentence that is mostly the same as one on an earlier page (the small
-    model likes to start a page by retelling how the last one ended). Paragraphs are kept; an
-    unfinished last sentence (still streaming) is left alone. Returns (text, sentences dropped)."""
+    model likes to start a page by retelling how the last one ended). Paragraphs are kept.
+    An unfinished last sentence (still streaming) is left alone, or left out with `finished_only`,
+    so that while a page streams in, only sentences already checked are shown and nothing appears
+    and then vanishes. If dropping would leave fewer than `floor` words, nothing is dropped.
+    Returns (text, sentences dropped)."""
     earlier = [_sentence_words(x) for page in earlier_pages for x in _SENTENCE_END.split(page or "")]
     earlier = [w for w in earlier if w]
-    if not earlier or not text:
+    if not text or not (earlier or finished_only):
         return text, 0
     dropped = 0
     paragraphs = []
-    for paragraph in text.split("\n\n"):
+    blocks = text.split("\n\n")
+    for b, paragraph in enumerate(blocks):
         pieces = _SENTENCE_END.split(paragraph.strip())
         kept = []
         for i, piece in enumerate(pieces):
-            finished = i < len(pieces) - 1 or re.search(r"[.!?][\"'\u201d\u2019]?$", piece)
-            if finished and _repeats(_sentence_words(piece), earlier):
+            finished = (i < len(pieces) - 1 or b < len(blocks) - 1
+                        or bool(re.search(r"[.!?][\"'\u201d\u2019]?$", piece)))
+            if not finished and finished_only:
+                continue
+            if finished and earlier and _repeats(_sentence_words(piece), earlier):
                 dropped += 1
             else:
                 kept.append(piece)
         if any(k.strip() for k in kept):
             paragraphs.append(" ".join(kept))
-    return "\n\n".join(paragraphs), dropped
+    result = "\n\n".join(paragraphs)
+    if dropped and word_count(result) < floor:
+        return drop_repeats(text, [], finished_only=finished_only)[0], 0  # keep the original sentences
+    return result, dropped
 
 
 def hero_notes(description: str) -> tuple[str, list[str]]:
@@ -377,6 +388,7 @@ class LLMStream:
     total_seconds: float | None = None
     tokens: int | None = None
     tokens_per_second: float | None = None
+    finish_reason: str | None = None  # "length" means the token limit cut the reply off
     _conn: http.client.HTTPConnection | None = field(default=None, repr=False)
     _cancelled: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -498,6 +510,8 @@ class LLMStream:
             if isinstance(usage, dict) and self.tokens is None:
                 self.tokens = usage.get("completion_tokens")
             for choice in event.get("choices") or []:
+                if choice.get("finish_reason"):
+                    self.finish_reason = choice["finish_reason"]
                 piece = (choice.get("delta") or {}).get("content")
                 if piece:
                     if self.first_token_seconds is None:
@@ -663,10 +677,14 @@ def word_count(text: str) -> int:
     return len(text.split())
 
 
+UNUSABLE_WORDS = 15
+
+
 def minimum_words() -> int:
-    """Shortest page we keep. Lenient on purpose: a slightly short page beats writing it again,
-    which the reader would see."""
-    return min(40, settings.segment_min_words)
+    """Shortest page we keep (counted before the repeat filter, which never takes a page below it).
+    Lenient on purpose: a 37-word page is a fine children's page, and much better than writing it
+    again while the reader watches."""
+    return UNUSABLE_WORDS
 
 
 @dataclass
@@ -709,9 +727,10 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
     segment = data.get("segment") or data.get("story") or data.get("text") or ""
     if not isinstance(segment, str):
         segment = ""
-    segment, dropped = drop_repeats(clean_text(segment, 1800), earlier_pages or [])
+    segment = clean_text(segment, 1800)
     if word_count(segment) < minimum_words():
         raise WriterFailed(f"page text too short ({word_count(segment)} words)")
+    segment, dropped = drop_repeats(segment, earlier_pages or [], floor=minimum_words())
     if segment.lstrip().startswith(("{", "[")) or '"visual_prompt"' in segment:
         raise WriterFailed("page text contains JSON")
 

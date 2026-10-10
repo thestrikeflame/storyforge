@@ -164,11 +164,12 @@ class Parsing(unittest.TestCase):
             parse_page("no json here", True, False)
         with self.assertRaises(WriterFailed):
             parse_page('{"segment": "Too short."}', True, False)
-        thirty = json.dumps({"segment": " ".join(["word"] * 30) + "."})
+        ten = json.dumps({"segment": " ".join(["word"] * 10) + "."})
         with self.assertRaises(WriterFailed):
-            parse_page(thirty, True, False)  # under 40 words: not a usable page
-        forty_five = json.dumps({"segment": " ".join(["word"] * 45) + "."})
-        self.assertEqual(len(parse_page(forty_five, True, False).segment.split()), 45)  # short, but kept
+            parse_page(ten, True, False)  # under 15 words: not a usable page
+        for words in (15, 37):  # short, but a fine children's page: kept
+            reply = json.dumps({"segment": " ".join(["word"] * words) + "."})
+            self.assertEqual(len(parse_page(reply, True, False).segment.split()), words)
         from storyforge.vision import clean_description
         self.assertEqual(clean_description("A smiling man wearing a hat, drawn in dark blue, with a big nose."),
                          "a smiling man wearing a hat, with a big nose")
@@ -352,12 +353,36 @@ class Parsing(unittest.TestCase):
         self.assertEqual(drop_repeats("Mira smiled. A warm light flickered under the old", ["Mira smiled."])[0],
                          "Mira smiled. A warm light flickered under the old")
         self.assertEqual(drop_repeats(page, []), (page, 0))
-        # parse_page drops them before checking the length
+        # parse_page drops them, but counts the words before it does
         new = " ".join(f"Brand new sentence number {n} is here." for n in range(8))
         reply = json.dumps({"segment": f"A warm light flickered under the old wooden door. {new}"})
         parsed = parse_page(reply, False, False, earlier_pages=earlier)
         self.assertTrue(parsed.segment.startswith("Brand new"))
         self.assertEqual(parsed.repeats_dropped, 1)
+
+    def test_repeat_filter_never_leaves_a_page_too_short(self):
+        from storyforge.llm import drop_repeats, parse_page
+        earlier = ["Mira ran all the way down the grassy hill. A warm light flickered under the old wooden door. "
+                   "She wondered what was waiting inside."]
+        # 21 words, of which the filter would leave 6: the original sentences are kept instead
+        page = ("Mira ran all the way down the grassy hill! A warm light flickered under the old wooden door. "
+                "Then she knocked twice.")
+        self.assertEqual(drop_repeats(page, earlier, floor=15), (page, 0))
+        self.assertEqual(drop_repeats(page, earlier)[1], 2)  # without a floor they would go
+        parsed = parse_page(json.dumps({"segment": page}), False, False, earlier_pages=earlier)
+        self.assertEqual((parsed.segment, parsed.repeats_dropped), (page, 0))
+
+    def test_only_finished_and_checked_sentences_stream_in(self):
+        from storyforge.llm import drop_repeats
+        earlier = ["A warm light flickered under the old wooden door."]
+        shown = lambda text: drop_repeats(text, earlier, finished_only=True)[0]
+        self.assertEqual(shown("Mira knocked twice. Then the do"), "Mira knocked twice.")
+        # a repeated sentence never shows up, even for a moment
+        self.assertEqual(shown("A warm light flickered under the old wood"), "")
+        self.assertEqual(shown("A warm light flickered under the old wooden door. Mira smi"), "")
+        self.assertEqual(shown("Mira knocked.\n\nA warm light flickered under the old wooden door. She"), "Mira knocked.")
+        # with nothing earlier (page 1), still only finished sentences
+        self.assertEqual(drop_repeats("One. Two thr", [], finished_only=True)[0], "One.")
 
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
@@ -641,6 +666,42 @@ class Flow(unittest.TestCase):
         self.assertNotIn("fight", sent)
         self.assertNotIn("sword", sent)
         self.assertIn("Mira chose to make friends with the dragon", page["text"])
+
+    def test_15_short_and_cut_off_pages(self):
+        llm_mode("normal")
+        log_file = TMP / "logs" / "storyforge.log"
+        story_id = new_story()
+        wait_ready(story_id, 0)
+        # 20 words: short, but kept as it is, at the first try
+        call("POST", f"{LLM}/control", {"short_pages": 1, "short_words": 20})
+        before = call("GET", f"{LLM}/state")[1]["requests"]
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "action": "", "after": 0})
+        page = wait_ready(story_id, 1)
+        self.assertEqual((page["status"], len(page["text"].split())), ("ready", 20))
+        self.assertEqual(call("GET", f"{LLM}/state")[1]["requests"] - before, 1)
+        self.assertRegex(log_file.read_text(), rf"page check failed  story={story_id} page=2  check=length  words=20")
+        # cut off by the token limit: the log says so, and the second try is used
+        call("POST", f"{LLM}/control", {"cut_off_pages": 1})
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "action": "", "after": 1})
+        page = wait_ready(story_id, 2)
+        self.assertEqual(page["status"], "ready")
+        self.assertRegex(log_file.read_text(), rf"page={3}  check=unusable  attempt=1  .*finish=length \(cut off\)"
+                                               r".*text_closed=False.*words_before_filter=\d+")
+        # both tries too short: the longer text is shown, with the bridge sentence for the choice it misses
+        call("POST", f"{LLM}/control", {"short_pages": 2, "short_words": 8, "ignore_choice": 2})
+        before = call("GET", f"{LLM}/state")[1]["requests"]
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "choice", "action": "Climb the tallest oak tree", "after": 2})
+        page = wait_ready(story_id, 3)
+        self.assertEqual(call("GET", f"{LLM}/state")[1]["requests"] - before, 2)
+        self.assertEqual(page["status"], "ready")
+        self.assertTrue(page["text"].startswith("So our hero decided to climb the tallest oak tree. "), page["text"])
+        self.assertGreaterEqual(len(page["choices"]), 2)
+        self.assertIn("kept the longest text", log_file.read_text())
+        # no text at all from either try: only then the friendly error (test_06 has the garbage case)
+        call("POST", f"{LLM}/control", {"short_pages": 2, "short_words": 0})
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "action": "", "after": 3})
+        page = wait_ready(story_id, 4)
+        self.assertEqual((page["status"], page["error"]["code"]), ("failed", "writer_failed"))
 
     def test_12_writer_offline(self):
         llm_mode("error500")

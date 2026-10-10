@@ -11,6 +11,9 @@ while running:  POST /control {"mode": "..."}  with one of:
   error500      always answer HTTP 500
 POST /control {"ignore_choice": n} makes the next n pages leave out the reader's choice (the
 "event" the schema fills in); otherwise a page starts by acting it out, as a good model would.
+POST /control {"short_pages": n, "short_words": k} makes the next n pages only k words long.
+POST /control {"cut_off_pages": n} cuts the next n replies off a few words into the page text,
+with finish_reason "length", as if the token limit was hit.
 """
 import json
 import sys
@@ -18,7 +21,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATE = {"mode": "normal", "delay": 0.01, "requests": 0, "last_user": "", "last_format": None,
-         "ignore_choice": 0, "last_schema": None}
+         "ignore_choice": 0, "last_schema": None, "short_pages": 0, "short_words": 8, "cut_off_pages": 0}
 
 PAGES = [
     "Mira was a small purple dragon, no bigger than a watering can, and she lived at the edge of the Whispering Wood. "
@@ -90,6 +93,9 @@ def build_reply(user_text: str, event: str | None = None) -> dict:
             STATE["ignore_choice"] -= 1
         else:
             reply["segment"] = f"Mira chose to {event[0].lower() + event[1:]}. " + reply["segment"]
+    if STATE["short_pages"] > 0:
+        STATE["short_pages"] -= 1
+        reply["segment"] = " ".join(reply["segment"].split()[: STATE["short_words"]])
     if first:
         reply["character_look"] = "a small purple baby dragon with large amber eyes and tiny wings"
         reply["world"] = "an enchanted forest of ancient oaks and glowing mushrooms"
@@ -161,6 +167,11 @@ class Handler(BaseHTTPRequestHandler):
             text = text[: text.index('"choices"') + 24]
         elif mode == "garbage":
             text = "I am sorry, but I would rather tell you about the weather today."
+        finish = "stop"
+        if STATE["cut_off_pages"] > 0:
+            STATE["cut_off_pages"] -= 1
+            text = text[: text.index('"segment"') + 60]
+            finish = "length"
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -173,7 +184,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
                 self.wfile.flush()
                 time.sleep(float(STATE["delay"]))
-            last = {"choices": [{"delta": {}, "finish_reason": "stop"}],
+            last = {"choices": [{"delta": {}, "finish_reason": finish}],
                     "timings": {"predicted_n": len(pieces), "predicted_per_second": 17.5}}
             self.wfile.write(b"data: " + json.dumps(last).encode() + b"\n\ndata: [DONE]\n\n")
             self.wfile.flush()
