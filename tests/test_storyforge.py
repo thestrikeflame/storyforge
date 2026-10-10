@@ -449,6 +449,26 @@ class Parsing(unittest.TestCase):
         self.assertEqual(choose_props(["glasses", "a ripe strawberry"], "", skip),
                          [{"name": "a ripe strawberry", "emoji": "🍓"}])
 
+    def test_cloud_backgrounds_lose_their_edges(self):
+        import io
+        from PIL import Image
+        from storyforge.images import CLEAN, ImageWorker, crop_edges, oversize
+        self.assertEqual((oversize(512), oversize(768)), (576, 864))
+        # a white picture with a dark "signature" in the bottom-right corner, within 5% of the edges
+        picture = Image.new("RGB", (576, 576), "white")
+        picture.paste((20, 20, 20), (530, 552, 574, 574))
+        raw = io.BytesIO()
+        picture.save(raw, "PNG")
+        data, kind = crop_edges(raw.getvalue(), 512, 512)
+        result = Image.open(io.BytesIO(data))
+        self.assertEqual((kind, result.format, result.size), ("jpg", "JPEG", (512, 512)))
+        self.assertGreater(min(result.convert("L").getdata()), 240)  # the signature is gone
+        with self.assertRaises(ValueError):
+            crop_edges(b"not a picture", 512, 512)
+        # the style asks for no lettering, said positively, right after the art style
+        prompt = ImageWorker.build_background_prompt({}, {"setting": "a quiet harbour"})
+        self.assertLess(prompt.index(CLEAN), prompt.index("quiet harbour"))
+
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
         long_page = "word " * 400
@@ -810,8 +830,14 @@ class CloudBackgrounds(unittest.TestCase):
         self.assertIn("bakery kitchen", page["image"]["alt"])
         self.assertEqual(page["hero_action"], "waving")
         self.assertEqual(page["props"], [{"name": "a ripe strawberry", "emoji": "🍓"}])  # "glimmering zorb": no emoji
-        status, png = call("GET", CLOUD + page["image"]["url"])
-        self.assertEqual((status, png[:8]), (200, b"\x89PNG\r\n\x1a\n"))
+        # asked a little larger, then 5% cut off every edge (where fake signatures sit): 512x512 again
+        self.assertEqual(state["last_size"], "576x576")
+        self.assertIn("clean illustration with no lettering, no signature, no watermark, no words", state["last_prompt"])
+        status, jpg = call("GET", CLOUD + page["image"]["url"])
+        self.assertEqual((status, jpg[:3]), (200, b"\xff\xd8\xff"))
+        from PIL import Image
+        import io
+        self.assertEqual(Image.open(io.BytesIO(jpg)).size, (512, 512))
         self.assertEqual(self.sd_rows(story_id), [])  # nothing painted on the Jetson
         # the hero layer: the placeholder until /draw exists
         status, story = call("GET", f"{CLOUD}/api/stories/{story_id}")

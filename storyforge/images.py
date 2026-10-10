@@ -35,6 +35,8 @@ Fast mode (optional, see scripts/get_fast_models.sh):
 from __future__ import annotations
 
 import asyncio
+import io
+import math
 import os
 import re
 import signal
@@ -51,6 +53,11 @@ IMAGE_MODES = ("huggingface", "local", "off")
 NO_CHARACTERS = "scenery only, empty landscape, no people, no animals, no characters"
 # Added to the style. FLUX ignores "no ...", so the composition is asked for positively: without it a
 # hero's feature in the prompt ("a cowboy hat") can come out as one giant object in the middle.
+# Also in the style: models like to add fake lettering ("WIRRTOIA7" in a corner). Said positively.
+CLEAN = "clean illustration with no lettering, no signature, no watermark, no words"
+# Fake signatures sit at the edges, so cloud backgrounds are requested a little larger and this
+# much is cut off every edge before the picture is shown.
+EDGE_CROP = 0.05
 COMPOSITION = "wide establishing shot, open empty ground in the center foreground, no single large object in the middle"
 
 
@@ -154,6 +161,29 @@ def worn_or_about_the_hero(prop: str, hero: frozenset[str]) -> bool:
     or name): the drawing already shows it, so it is not shown again as an emoji."""
     keys = {_word_key(w) for w in prop.split()}
     return bool(keys & WORN_WORDS or keys & hero)
+
+
+def oversize(n: int) -> int:
+    """The size to ask for so that n is left once EDGE_CROP is cut off both edges (a multiple of 16,
+    as image models like): 512 -> 576."""
+    return min(1440, math.ceil(n / (1 - 2 * EDGE_CROP) / 16) * 16)
+
+
+def crop_edges(data: bytes, width: int, height: int) -> tuple[bytes, str]:
+    """Cut EDGE_CROP off every edge (where fake signatures and lettering sit) and scale the rest to
+    width x height. Returns (JPEG bytes, "jpg"). Raises ValueError if the picture can't be read."""
+    from PIL import Image, UnidentifiedImageError  # in the venv; only needed for cloud pictures
+    try:
+        with Image.open(io.BytesIO(data)) as picture:
+            picture.load()
+            w, h = picture.size
+            dx, dy = round(w * EDGE_CROP), round(h * EDGE_CROP)
+            cropped = picture.convert("RGB").crop((dx, dy, w - dx, h - dy))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"could not read the picture: {exc}") from None
+    out = io.BytesIO()
+    cropped.resize((width, height), Image.LANCZOS).save(out, "JPEG", quality=92)
+    return out.getvalue(), "jpg"
 
 
 def preset_backgrounds() -> list[Path]:
@@ -379,12 +409,15 @@ class ImageWorker:
         reason = ""
         try:
             self._on_change(story)
+            asked = (oversize(settings.sd_width), oversize(settings.sd_height))
             data, kind = await asyncio.wait_for(
-                asyncio.to_thread(
-                    hf_images.generate, prompt, settings.sd_width, settings.sd_height, int(story.get("seed", 42))
-                ),
+                asyncio.to_thread(hf_images.generate, prompt, *asked, int(story.get("seed", 42))),
                 timeout=settings.hf_timeout + 2,  # backstop; generate() keeps its own deadline
             )
+            try:
+                data, kind = await asyncio.to_thread(crop_edges, data, settings.sd_width, settings.sd_height)
+            except (ValueError, ImportError) as exc:  # show it uncropped rather than not at all
+                log.warning("background not cropped  story=%s page=%d  %s", story["id"], page, exc)
             seconds = round(time.monotonic() - started, 1)
             name = f"sf_{story['id']}_{seg['index']}.{kind}"
             tmp_path = settings.image_dir / f"{name}.part"
@@ -395,8 +428,8 @@ class ImageWorker:
                     (settings.image_dir / f"sf_{story['id']}_{seg['index']}.{other}").unlink(missing_ok=True)
             image.update(status="completed", progress=1.0, error=None, file=name, seconds=seconds, source="huggingface")
             log.info(
-                "background painted  story=%s page=%d  %.1fs  huggingface %s  %dx%d\n    prompt: %s",
-                story["id"], page, seconds, settings.hf_image_model, settings.sd_width, settings.sd_height, prompt,
+                "background painted  story=%s page=%d  %.1fs  huggingface %s  %dx%d, edges cropped to %dx%d\n    prompt: %s",
+                story["id"], page, seconds, settings.hf_image_model, *asked, settings.sd_width, settings.sd_height, prompt,
             )
             timings.record("image", ok=True, seconds=seconds, mode="huggingface",
                            size=f"{settings.sd_width}x{settings.sd_height}")
@@ -499,7 +532,7 @@ class ImageWorker:
                    if d.strip() and is_scenery(d, hero)]
         scene = ", ".join([place.rstrip("."), *details])
         scene = " ".join(scene.split()[: settings.sd_prompt_words])
-        return f"{settings.sd_style}, {COMPOSITION}, {scene}, {NO_CHARACTERS}"
+        return f"{settings.sd_style}, {CLEAN}, {COMPOSITION}, {scene}, {NO_CHARACTERS}"
 
     def build_command(self, prompt: str, seed: int, out_path: Path, plan: dict | None = None) -> list[str]:
         # A list of arguments (never a shell string), so story text cannot inject commands.

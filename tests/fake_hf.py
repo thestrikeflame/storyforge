@@ -70,6 +70,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not found"})
         STATE["requests"] += 1
         STATE["last_prompt"] = body.get("prompt", "")
+        STATE["last_size"] = body.get("size", "")
         STATE["last_path"] = self.path
         STATE["times"].append(time.time())
         if self.headers.get("Authorization") != "Bearer test-token":
