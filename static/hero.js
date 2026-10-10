@@ -1,16 +1,20 @@
 /* StoryForge: brings the child's hero drawing to life on top of each page's background.
    CSS does the moving (see style.css, "Hero animation"); this file only
-     - sets the page's action on the picture frame (data-action), restarting it for a new page,
-     - re-seeds the SVG "line boil" filter a few times per second, so the drawing wobbles like
+     - sets the page's action on the picture frame (data-action) once the hero has faded in. The
+       action plays once (twice for walking and flying), then only gentle breathing is left,
+     - re-seeds the SVG "line boil" filter about 4 times per second, so the drawing wobbles like
        hand-drawn animation,
-     - and spawns the matching particles: dust puffs, sparkles, bubbles and zzz.
+     - and spawns the matching particles (dust puffs, sparkles, bubbles and zzz) while the action
+       plays, stopping when it ends.
    With "reduce motion" on, the hero simply stands still: no boil, no particles, no movement. */
 (() => {
   "use strict";
 
   const ACTIONS = ["standing", "walking", "running", "jumping", "waving", "flying", "swimming", "sleeping",
                    "cheering", "dancing", "spinning", "hiding"];
-  const BOIL_MS = 160; // about 6 new wobbles per second, like drawings on paper re-traced each frame
+  const BOIL_MS = 250; // about 4 new wobbles per second, like drawings on paper re-traced each frame
+  const START_MS = 900; // the hero fades in first (hero-in in style.css), then acts
+  const LONGEST_MS = 16000; // a safety stop for the particles if the browser cannot tell when the action ends
 
   // Particles per action: [kind, every ms, where on the hero (0..1 across, 0..1 down)].
   const PARTICLES = {
@@ -27,7 +31,10 @@
 
   function create(figure, { fx, noise }) {
     let action = null;
+    let acting = false; // the action is still playing; particles only then
+    let run = 0; // which set() call is current, so an old action's end is ignored
     let boilTimer = null;
+    let startTimer = null;
     let particleTimers = [];
 
     const moving = () => !reduceMotion.matches && action && figure.dataset.state === "completed" && !document.hidden;
@@ -76,12 +83,29 @@
       particleTimers.forEach((t) => { clearInterval(t); clearTimeout(t); });
       particleTimers = [];
       if (fx) fx.textContent = "";
-      if (!moving()) return;
+      if (!moving() || !acting) return;
       for (const [kind, every, at, offset] of PARTICLES[action] || []) {
         const start = () => particleTimers.push(setInterval(() => spawn(kind, at), every));
         if (offset) particleTimers.push(setTimeout(() => { spawn(kind, at); start(); }, offset));
         else start();
       }
+    }
+
+    // The action's CSS animations are all finite (only the breathing loops), so once they have
+    // finished the hero is idle and the particles stop.
+    function whenActionEnds(mine) {
+      const done = () => {
+        if (mine !== run || !acting) return;
+        acting = false;
+        particles();
+      };
+      setTimeout(done, LONGEST_MS);
+      requestAnimationFrame(() => {
+        if (!figure.getAnimations) return;
+        const playing = figure.getAnimations({ subtree: true })
+          .filter((a) => a.effect && a.effect.getTiming().iterations !== Infinity && a.animationName !== "hero-in");
+        Promise.all(playing.map((a) => a.finished)).then(done, () => {}); // cancelled: a new page took over
+      });
     }
 
     function refresh() {
@@ -90,18 +114,31 @@
     }
 
     return {
-      // Show this page's action. The same action on a new page starts again from the beginning.
+      // Play this page's action once the hero has faded in. The same action on a new page plays again.
       set(next) {
-        action = ACTIONS.includes(next) ? next : "standing";
+        const mine = ++run;
+        clearTimeout(startTimer);
+        action = null;
+        acting = false;
         figure.removeAttribute("data-action");
-        void figure.offsetWidth; // restart the CSS animations
-        figure.dataset.action = action;
         refresh();
+        const wanted = ACTIONS.includes(next) ? next : "standing";
+        startTimer = setTimeout(() => {
+          if (mine !== run) return;
+          action = wanted;
+          acting = true;
+          figure.dataset.action = action;
+          refresh();
+          whenActionEnds(mine);
+        }, reduceMotion.matches ? 0 : START_MS);
       },
       // Call when the picture frame changes state (painted, waiting, failed...).
       refresh,
       stop() {
+        run++;
+        clearTimeout(startTimer);
         action = null;
+        acting = false;
         figure.removeAttribute("data-action");
         refresh();
       },

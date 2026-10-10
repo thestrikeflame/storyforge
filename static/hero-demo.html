@@ -21,11 +21,11 @@
 <svg class="defs" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
   <filter id="line-boil" x="-6%" y="-6%" width="112%" height="112%">
     <feTurbulence id="line-boil-noise" type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="1"/>
-    <feDisplacementMap in="SourceGraphic" scale="4" xChannelSelector="R" yChannelSelector="G"/>
+    <feDisplacementMap in="SourceGraphic" scale="2" xChannelSelector="R" yChannelSelector="G"/>
   </filter>
 </svg>
 <h1>Hero actions</h1>
-<p class="note">Every action a page can give the hero. Add <code>?hero=/api/stories/&lt;id&gt;/hero</code> to try a real drawing.</p>
+<p class="note">Every action a page can give the hero. Each plays once when the page appears; tap a picture to play it again. Add <code>?hero=/api/stories/&lt;id&gt;/hero</code> to try a real drawing.</p>
 <div class="grid" id="grid"></div>
 <template id="tile">
   <figure class="tile">
@@ -64,6 +64,7 @@
       });
       animator.init();
       animator.set(action);
+      tile.addEventListener("click", () => animator.set(action));
     });
   })();
 </script>
