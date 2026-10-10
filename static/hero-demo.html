@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hero actions · StoryForge</title>
+<link rel="icon" href="/static/art/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* A preview of every hero action, using the storybook's own CSS and hero.js. */
+  body { display: block; padding: 24px 16px; }
+  h1 { color: var(--parchment); font-family: var(--display); margin: 0 0 4px; }
+  .note { color: var(--mist); margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 22px; }
+  .tile { margin: 0; }
+  .tile .picture { max-width: none; }
+  .tile figcaption { color: var(--parchment); font-family: var(--display); font-size: 1.15rem; text-align: center; margin-top: 12px; }
+</style>
+</head>
+<body>
+<svg class="defs" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <filter id="line-boil" x="-6%" y="-6%" width="112%" height="112%">
+    <feTurbulence id="line-boil-noise" type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="1"/>
+    <feDisplacementMap in="SourceGraphic" scale="4" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</svg>
+<h1>Hero actions</h1>
+<p class="note">Every action a page can give the hero. Add <code>?hero=/api/stories/&lt;id&gt;/hero</code> to try a real drawing.</p>
+<div class="grid" id="grid"></div>
+<template id="tile">
+  <figure class="tile">
+    <div class="picture" data-state="completed">
+      <img class="background" alt="">
+      <div class="hero-stage" aria-hidden="true">
+        <div class="hero-move">
+          <span class="hero-shadow"></span>
+          <div class="hero-flip"><div class="hero-act"><div class="hero-breath">
+            <img class="hero" alt="" draggable="false">
+          </div></div></div>
+        </div>
+      </div>
+      <div class="hero-fx" aria-hidden="true"></div>
+    </div>
+    <figcaption></figcaption>
+  </figure>
+</template>
+<script src="/static/hero.js"></script>
+<script>
+  (() => {
+    const backgrounds = { swimming: "underwater", flying: "space", sleeping: "village", hiding: "castle", running: "beach", walking: "village" };
+    const hero = new URLSearchParams(location.search).get("hero") || "/static/art/hero-placeholder.png";
+    const noise = document.getElementById("line-boil-noise");
+    window.HeroAnimator.ACTIONS.forEach((action, i) => {
+      const tile = document.getElementById("tile").content.firstElementChild.cloneNode(true);
+      tile.querySelector("figcaption").textContent = action;
+      tile.querySelector(".background").src = `/static/art/preset-${backgrounds[action] || ["castle", "beach", "village", "space", "underwater"][i % 5]}.jpg`;
+      const img = tile.querySelector(".hero");
+      img.src = hero;
+      img.style.filter = "url(#line-boil)";
+      document.getElementById("grid").appendChild(tile);
+      // Only the first tile drives the shared line-boil noise; the others just animate.
+      const animator = window.HeroAnimator.create(tile.querySelector(".picture"), {
+        fx: tile.querySelector(".hero-fx"), noise: i === 0 ? noise : null,
+      });
+      animator.init();
+      animator.set(action);
+    });
+  })();
+</script>
+</body>
+</html>

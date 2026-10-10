@@ -42,9 +42,10 @@ SYSTEM_PROMPT = (
     "Reply with one JSON object only, no other text."
 )
 
-# What the hero does on a page. PROVISIONAL: to be replaced by the fixed list for hero animation.
-HERO_ACTIONS = ("standing", "walking", "running", "jumping", "waving", "sitting", "flying", "swimming",
-                "sleeping", "cheering")
+# What the hero does on a page; the browser animates the hero layer for each (static/hero.js).
+# The first one is the default for anything off the list.
+HERO_ACTIONS = ("standing", "walking", "running", "jumping", "waving", "flying", "swimming", "sleeping",
+                "cheering", "dancing", "spinning", "hiding")
 
 # The page plan is asked for first, so the background is painted while the page is written.
 _PLAN_KEYS = (
@@ -72,6 +73,16 @@ _SUMMARY_KEY = (
 )
 
 
+def hero_notes(description: str) -> tuple[str, list[str]]:
+    """Split the vision description into the kind of character and a few short features, so the
+    storyteller gets notes to use rather than a sentence to copy.
+    "a small blue fish with a yellow crown, one black eye, and a red tail"
+      -> ("a small blue fish", ["a yellow crown", "one black eye", "a red tail"])"""
+    kind, _, rest = description.partition(" with ")
+    features = [f.strip(" .") for f in re.split(r",\s*(?:and\s+)?|\s+and\s+", rest) if f.strip(" .")]
+    return kind.strip(" ,.") or description, features[:4]
+
+
 def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
     """Build the chat messages for the next page. Sends a compact summary plus only the
     most recent page, never the whole history, so the 2048-token context is not exceeded."""
@@ -83,11 +94,16 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
 
     if not ready:
         hero = story.get("hero_description")
-        hero_line = (
-            f"The hero is a character the reader drew: {hero}. Make this character the main character, "
-            "keep exactly this look, and give it a fitting name. Introduce it by that name in your own "
-            "words; do not copy this description word for word.\n\n" if hero else ""
-        )
+        hero_line = ""
+        if hero:
+            kind, features = hero_notes(hero)
+            hero_line = (
+                f"The hero is a character the reader drew: {kind}."
+                + (f" Notes: {'; '.join(features)}." if features else "")
+                + " Make it the main character. Choose its name in \"hero_name\" and begin the page with "
+                "that name. Tell what the hero does, in fresh story words; never list its looks in one "
+                "long sentence. Mention one of the notes naturally, later in the page.\n\n"
+            )
         user = (
             f"The reader's idea for the story:\n\"{story['premise']}\"\n\n"
             + hero_line +
@@ -95,7 +111,8 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             "of curiosity so the reader wants to decide what happens next. Do not resolve anything.\n\n"
             "Use these JSON keys in this order:\n"
             '"title": a title for the story, at most 6 words.\n'
-            + _PLAN_KEYS +
+            + _PLAN_KEYS
+            + ('"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n' if hero else "") +
             '"segment": the text of page 1, written from the plan above.\n'
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
@@ -121,7 +138,8 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
         user = (
             f"Story title: {story.get('title') or 'Untitled'}\n"
             f"The reader's original idea: \"{story['premise']}\"\n"
-            f"Main character looks like: {story.get('character_look') or 'not described yet'}\n"
+            + (f"Main character's name: {story['hero_name']}\n" if story.get("hero_name") else "")
+            + f"Main character looks like: {story.get('character_look') or 'not described yet'}\n"
             f"Setting: {story.get('world') or 'not described yet'}\n"
             f"Previous page's place: {ready[-1].get('setting') or 'not described'} "
             "(stay there or move somewhere new, as the story needs)\n"
@@ -137,7 +155,7 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def response_schema(first: bool, final: bool) -> dict:
+def response_schema(first: bool, final: bool, drawn_hero: bool = False) -> dict:
     """JSON schema handed to llama-server so its grammar forces well-formed output."""
     props: dict = {}
     if first:
@@ -145,6 +163,8 @@ def response_schema(first: bool, final: bool) -> dict:
     props["setting"] = {"type": "string"}
     props["visual_details"] = {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 3}
     props["action"] = {"type": "string", "enum": list(HERO_ACTIONS)}
+    if first and drawn_hero:
+        props["hero_name"] = {"type": "string"}
     props["segment"] = {"type": "string"}
     if first:
         props["character_look"] = {"type": "string"}
@@ -479,6 +499,7 @@ class Page:
     character_look: str = ""
     world: str = ""
     setting: str = ""
+    hero_name: str = ""
     visual_details: list[str] = field(default_factory=list)
     hero_action: str = HERO_ACTIONS[0]
     used_fallback_choices: bool = False
@@ -492,7 +513,7 @@ def parse_page(raw: str, first: bool, final: bool) -> Page:
     if data is None:
         # Salvage field by field from broken JSON.
         data = {}
-        for key in ("title", "setting", "action", "segment", "character_look", "world", "visual_prompt", "continuity_summary"):
+        for key in ("title", "setting", "action", "hero_name", "segment", "character_look", "world", "visual_prompt", "continuity_summary"):
             value, _complete = extract_string_field(raw, key)
             if value:
                 data[key] = value
@@ -552,6 +573,7 @@ def parse_page(raw: str, first: bool, final: bool) -> Page:
         character_look=line("character_look", 180) if first else "",
         world=line("world", 180) if first else "",
         setting=line("setting", 180),
+        hero_name=line("hero_name", 40) if first else "",
         visual_details=clean_details(data.get("visual_details")),
         hero_action=clean_action(data.get("action")),
         used_fallback_choices=used_fallback,

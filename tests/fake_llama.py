@@ -61,6 +61,8 @@ def build_reply(user_text: str) -> dict:
         reply["setting"] = f"a sunny sandy beach beside a red lighthouse, scene {number}"
         reply["visual_details"] = ["seashells in the sand", "a striped beach umbrella"]
         reply["action"] = "walking"
+    if first and '"hero_name"' in user_text:
+        reply["hero_name"] = "Captain Whiskers"
     reply["segment"] = ENDING if final else PAGES[(number - 1) % len(PAGES)]
     if first:
         reply["character_look"] = "a small purple baby dragon with large amber eyes and tiny wings"

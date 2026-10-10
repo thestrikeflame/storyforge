@@ -625,6 +625,13 @@
   }
 
   let shownPicture = null;
+  const heroAnimator = window.HeroAnimator
+    ? window.HeroAnimator.create($("picture"), { fx: $("hero-fx"), noise: document.getElementById("line-boil-noise") })
+    : null;
+  if (heroAnimator) heroAnimator.init();
+  // Set in JS, not the stylesheet: a url(#id) in an external stylesheet may look for the filter there.
+  $("hero-img").style.filter = "url(#line-boil)";
+
   function renderPicture() {
     const page = currentPage();
     const figure = $("picture");
@@ -638,7 +645,7 @@
     $("picture-meter-fill").style.transform = `scaleX(${status === "generating" ? image.progress || 0.02 : 0})`;
     $("picture-meter").setAttribute("aria-valuenow", String(Math.round((image.progress || 0) * 100)));
 
-    const key = `${state.story.id}:${page.index}:${page.status}:${status}:${image.url || ""}:${state.story.heroUrl}`;
+    const key = `${state.story.id}:${page.index}:${page.status}:${status}:${image.url || ""}:${state.story.heroUrl}:${page.hero_action || ""}`;
     if (key === shownPicture) return;
     shownPicture = key;
 
@@ -656,18 +663,20 @@
         // The background is scenery only; the same hero stands in every scene.
         if (hero.getAttribute("src") !== state.story.heroUrl) hero.src = state.story.heroUrl;
         figure.dataset.state = "completed";
+        if (heroAnimator) heroAnimator.set(page.hero_action || "standing");
       };
       loader.onerror = () => {
         page.pictureBroken = true;
         if (state.story && state.story.id === storyId && state.view === index) { shownPicture = null; renderPicture(); renderNext(); }
       };
-      if (figure.dataset.state === "completed") figure.dataset.state = "generating";
+      if (figure.dataset.state === "completed") { figure.dataset.state = "generating"; if (heroAnimator) heroAnimator.stop(); }
       loader.src = image.url;
       return;
     }
     img.removeAttribute("src");
     img.alt = "";
     figure.dataset.state = status;
+    if (heroAnimator) heroAnimator.stop();
     if (status === "waiting") {
       $("painting-label").textContent = page.status === "failed" ? "No picture yet" : "The picture comes after the words";
     } else if (status === "queued") {

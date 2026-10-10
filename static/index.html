@@ -11,6 +11,14 @@
   <link rel="icon" href="/static/art/icon.svg" type="image/svg+xml">
 </head>
 <body data-view="landing">
+<!-- "Line boil" for the hero drawing: a little noise displaces its lines; hero.js re-seeds it a few
+     times per second so the drawing wobbles like hand-drawn animation. -->
+<svg class="defs" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <filter id="line-boil" x="-6%" y="-6%" width="112%" height="112%">
+    <feTurbulence id="line-boil-noise" type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="1"/>
+    <feDisplacementMap in="SourceGraphic" scale="4" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</svg>
 
 <header class="top">
   <a class="wordmark" href="/" id="wordmark" aria-label="StoryForge, back to the cover">StoryForge</a>
@@ -171,8 +179,17 @@
     <div class="page page-picture">
       <figure class="picture" id="picture" data-state="waiting">
         <img id="picture-img" alt="">
-        <!-- The child's hero drawing (a transparent PNG), layered on every page's background. -->
-        <img id="hero-img" class="hero" alt="" draggable="false">
+        <!-- The child's hero drawing (a transparent PNG), layered on every page's background and
+             animated from the page's hero_action (style.css "Hero animation", hero.js). -->
+        <div class="hero-stage" aria-hidden="true">
+          <div class="hero-move">
+            <span class="hero-shadow"></span>
+            <div class="hero-flip"><div class="hero-act"><div class="hero-breath">
+              <img id="hero-img" class="hero" alt="" draggable="false">
+            </div></div></div>
+          </div>
+        </div>
+        <div class="hero-fx" id="hero-fx" aria-hidden="true"></div>
         <div class="painting" id="painting">
           <div class="wash" aria-hidden="true"><i></i><i></i><i></i></div>
           <p class="painting-label" id="painting-label">Painting this page</p>
@@ -250,6 +267,7 @@
 
 <div class="toast" id="toast" role="alert" hidden></div>
 
+<script src="/static/hero.js" defer></script>
 <script src="/static/app.js" defer></script>
 </body>
 </html>

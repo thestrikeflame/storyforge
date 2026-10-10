@@ -138,7 +138,7 @@ async def write_segment(story: dict, seg: dict) -> None:
             for attempt in (1, 2):
                 stream = llm.LLMStream(
                     messages=llm.build_messages(story, seg["action"], final),
-                    schema=llm.response_schema(first, final),
+                    schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description"))),
                     temperature=settings.llm_temperature if attempt == 1 else 0.5,
                 )
                 active_streams[story["id"]] = stream
@@ -212,6 +212,8 @@ async def write_segment(story: dict, seg: dict) -> None:
         story["title"] = page.title or _title_from_premise(story["premise"])
         # A drawn hero keeps the vision model's description; the writer never redescribes it.
         story["character_look"] = story.get("hero_description") or page.character_look
+        if page.hero_name and story.get("hero_description"):
+            story["hero_name"] = page.hero_name
         story["world"] = page.world
     if page.summary:
         story["summary"] = page.summary
@@ -383,7 +385,8 @@ async def create_drawn_story(body: DrawnHero):
     story["hero_description"] = description
     story["character_look"] = description
     if not idea:
-        story["premise"] = f"A story starring {description}"
+        # Only the kind of character: the full description in the premise gets copied into page 1.
+        story["premise"] = f"A story starring {llm.hero_notes(description)[0]}"
 
     seg = new_segment(0, None, "opening")
     story["segments"].append(seg)

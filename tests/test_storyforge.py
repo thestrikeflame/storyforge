@@ -195,9 +195,35 @@ class Parsing(unittest.TestCase):
         page = parse_page(json.dumps({"segment": words, "action": "attacking"}), False, False)
         self.assertEqual(page.hero_action, HERO_ACTIONS[0])  # anything off the list becomes the default
         # broken JSON: the plan is still salvaged
-        page = parse_page('{"setting": "a castle hall", "visual_details": ["a long table", "candles"], "action": "sitting", '
+        page = parse_page('{"setting": "a castle hall", "visual_details": ["a long table", "candles"], "action": "dancing", '
                           '"segment": "' + words + '", "choices": ["Open', False, False)
-        self.assertEqual((page.setting, page.visual_details, page.hero_action), ("a castle hall", ["a long table", "candles"], "sitting"))
+        self.assertEqual((page.setting, page.visual_details, page.hero_action), ("a castle hall", ["a long table", "candles"], "dancing"))
+
+    def test_every_hero_action_is_animated(self):
+        import re as regex
+        from storyforge.llm import HERO_ACTIONS
+        hero_js = (ROOT / "static" / "hero.js").read_text()
+        css = (ROOT / "static" / "style.css").read_text()
+        listed = regex.search(r"const ACTIONS = \[(.*?)\];", hero_js, regex.S).group(1)
+        self.assertEqual(tuple(regex.findall(r'"(\w+)"', listed)), HERO_ACTIONS)  # same list, same order
+        for action in HERO_ACTIONS[1:]:  # "standing" is breathing only
+            self.assertIn(f'[data-action="{action}"]', css, action)
+        self.assertIn("prefers-reduced-motion", hero_js)
+        reduced = css[css.index("/* Reduce motion: the hero just stands there. */"):]
+        self.assertIn(".hero-stage, .hero-stage *, .hero-fx { animation: none !important; }", reduced)
+        page = (ROOT / "static" / "index.html").read_text()
+        for needle in ('id="line-boil-noise"', "feDisplacementMap", 'src="/static/hero.js"', 'class="hero-shadow"', 'id="hero-fx"'):
+            self.assertIn(needle, page)
+
+    def test_hero_notes_and_name_field(self):
+        from storyforge.llm import hero_notes, response_schema
+        self.assertEqual(hero_notes("a small blue fish with a yellow crown, one black eye, and a red triangular tail"),
+                         ("a small blue fish", ["a yellow crown", "one black eye", "a red triangular tail"]))
+        self.assertEqual(hero_notes("a brave little hero in bright colours"), ("a brave little hero in bright colours", []))
+        drawn = list(response_schema(True, False, drawn_hero=True)["properties"])
+        self.assertLess(drawn.index("hero_name"), drawn.index("segment"))
+        self.assertNotIn("hero_name", response_schema(True, False)["properties"])
+        self.assertNotIn("hero_name", response_schema(False, False, drawn_hero=True)["properties"])
 
     def test_plan_is_only_used_once_complete(self):
         from storyforge.llm import extract_plan
@@ -612,7 +638,7 @@ class DrawnHero(unittest.TestCase):
         self.assertEqual(status, 201, story)
         description = "a round orange cat with a tall green hat and a long striped tail"
         self.assertEqual(story["hero_description"], description)
-        self.assertEqual(story["premise"], f"A story starring {description}")
+        self.assertEqual(story["premise"], "A story starring a round orange cat")
         self.assertEqual(len(story["segments"]), 1)
         vision = call("GET", f"{HF}/state")[1]
         self.assertEqual(vision["vision_models"], ["meta-llama/Llama-4-Scout-17B-16E-Instruct"])
@@ -624,14 +650,23 @@ class DrawnHero(unittest.TestCase):
         # the storyteller is told about the drawn hero, and keeps its look
         page = wait_ready(story["id"], 0, CLOUD)
         self.assertEqual(page["status"], "ready")
-        self.assertIn(f"The hero is a character the reader drew: {description}", call("GET", f"{LLM}/state")[1]["last_user"])
+        first_prompt = call("GET", f"{LLM}/state")[1]["last_user"]
+        # notes to use, not a sentence to copy; and a name chosen before the page is written
+        self.assertIn("The hero is a character the reader drew: a round orange cat. "
+                      "Notes: a tall green hat; a long striped tail.", first_prompt)
+        self.assertNotIn(description, first_prompt)
+        self.assertLess(first_prompt.index('"hero_name"'), first_prompt.index('"segment"'))
         saved = json.loads((TMP / "cloud_data" / "sessions" / f"{story['id']}.json").read_text())
         self.assertEqual(saved["character_look"], description)
         self.assertEqual(saved["hero_description"], description)
         self.assertTrue((TMP / "cloud_data" / "heroes" / f"{story['id']}.png").is_file())
         call("POST", f"{CLOUD}/api/stories/{story['id']}/continue", {"kind": "continue", "after": 0})
         wait_ready(story["id"], 1, CLOUD)
-        self.assertIn(f"Main character looks like: {description}", call("GET", f"{LLM}/state")[1]["last_user"])
+        later_prompt = call("GET", f"{LLM}/state")[1]["last_user"]
+        self.assertIn("Main character's name: Captain Whiskers", later_prompt)
+        self.assertIn(f"Main character looks like: {description}", later_prompt)
+        self.assertEqual(json.loads((TMP / "cloud_data" / "sessions" / f"{story['id']}.json").read_text())["hero_name"],
+                         "Captain Whiskers")
 
     def test_3_next_vision_model_is_tried_and_the_story_starts_even_without_one(self):
         call("POST", f"{HF}/control", {"vision": "first_fails", "vision_models": []})
