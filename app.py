@@ -12,6 +12,10 @@ How a page is made:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import os
+import struct
 import time
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -22,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from storyforge import llm, speech, tls_proxy
+from storyforge import llm, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
 from storyforge.images import ImageWorker, preset_backgrounds
@@ -200,7 +204,8 @@ async def write_segment(story: dict, seg: dict) -> None:
 
     if first:
         story["title"] = page.title or _title_from_premise(story["premise"])
-        story["character_look"] = page.character_look
+        # A drawn hero keeps the vision model's description; the writer never redescribes it.
+        story["character_look"] = story.get("hero_description") or page.character_look
         story["world"] = page.world
     if page.summary:
         story["summary"] = page.summary
@@ -275,6 +280,33 @@ class NewStory(BaseModel):
     premise: str = Field(min_length=1, max_length=settings.max_premise_chars)
 
 
+class DrawnHero(BaseModel):
+    # Base64 (optionally a data: URL). The PNG keeps its transparency and becomes the hero layer;
+    # the JPEG is the same drawing on white, for the vision model.
+    hero_png: str = Field(min_length=100, max_length=6_000_000)
+    preview_jpeg: str = Field(min_length=100, max_length=2_000_000)
+    idea: str = Field(default="", max_length=settings.max_premise_chars)
+
+
+def _decode_image(value: str, magic: bytes, limit: int) -> bytes:
+    if value.startswith("data:"):
+        value = value.partition(",")[2]
+    try:
+        data = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        data = b""
+    if not data.startswith(magic) or len(data) > limit:
+        raise HTTPException(422, "The drawing could not be read. Try pressing Done again.")
+    return data
+
+
+def _png_size(data: bytes) -> tuple[int, int]:
+    """Width and height from the PNG header (the first chunk is always IHDR)."""
+    if len(data) < 24 or data[12:16] != b"IHDR":
+        return 0, 0
+    return struct.unpack(">II", data[16:24])
+
+
 class NextPage(BaseModel):
     kind: Literal["choice", "custom", "continue", "finish"]
     action: str = Field(default="", max_length=settings.max_action_chars)
@@ -312,6 +344,52 @@ async def create_story(body: NewStory):
     log.info("story started  story=%s  idea=%r", story["id"], premise[:80])
     _start_writing(story, seg)
     return _no_store(story_view(story, worker.eta_seconds()), 201)
+
+
+@app.post("/api/stories/drawn")
+async def create_drawn_story(body: DrawnHero):
+    """From /draw: a new story whose hero is the child's drawing. Saves the drawing, asks a vision
+    model for a one-sentence description, then starts page 1 with that character as the hero."""
+    if _waiting_writes() >= MAX_WAITING_WRITES:
+        raise HTTPException(503, "The storyteller is busy with other stories. Try again in a moment.")
+    hero_png = _decode_image(body.hero_png, b"\x89PNG\r\n\x1a\n", 4_000_000)
+    preview = _decode_image(body.preview_jpeg, b"\xff\xd8\xff", 1_500_000)
+    width, height = _png_size(hero_png)
+    if not (8 <= width <= 2048 and 8 <= height <= 2048):
+        raise HTTPException(422, "The drawing could not be read. Try pressing Done again.")
+    idea = llm.clean_text(body.idea, settings.max_premise_chars)
+
+    story = new_story(idea or "A story about the hero I drew")
+    path = hero_path(story["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    tmp.write_bytes(hero_png)
+    os.replace(tmp, path)
+    story["hero"] = int(time.time())
+
+    started = time.monotonic()
+    try:
+        description, model = await asyncio.to_thread(vision.describe_hero, preview)
+        log.info("hero described  story=%s  %.1fs  %s: %s", story["id"], time.monotonic() - started, model, description)
+    except vision.VisionFailed as exc:
+        description = vision.FALLBACK
+        log.warning("hero could not be described (%s); using a general description", exc)
+    story["hero_description"] = description
+    story["character_look"] = description
+    if not idea:
+        story["premise"] = f"A story starring {description}"
+
+    seg = new_segment(0, None, "opening")
+    story["segments"].append(seg)
+    store.add(story)
+    log.info("story started from a drawing  story=%s  hero=%dx%d", story["id"], width, height)
+    _start_writing(story, seg)
+    return _no_store({**story_view(story, worker.eta_seconds()), "hero_description": description}, 201)
+
+
+@app.get("/draw")
+async def draw_page():
+    return FileResponse(settings.static_dir / "draw.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/stories/{story_id}")

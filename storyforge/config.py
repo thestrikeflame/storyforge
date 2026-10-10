@@ -89,6 +89,13 @@ class Settings:
     hf_image_model: str = _get("HF_IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell")
     hf_timeout: int = _int("HF_TIMEOUT_SECONDS", 20, 5, 120)
     hf_fallback_local: bool = _get("HF_FALLBACK_LOCAL", "1") not in ("0", "false", "no", "off")
+    # Describes the child's hero drawing; tried in order through the same router and key.
+    vision_models: tuple[str, ...] = tuple(
+        m.strip() for m in _get(
+            "VISION_MODELS", "meta-llama/Llama-4-Scout-17B-16E-Instruct,google/gemma-3-27b-it"
+        ).split(",") if m.strip()
+    )
+    vision_timeout: int = _int("VISION_TIMEOUT_SECONDS", 20, 5, 120)
 
     tts_mode: str = _get("TTS_MODE", "auto").lower()
     piper_bin: Path = Path(_get("PIPER_BIN", "/home/akw/jetson-ai/.venv/bin/piper"))

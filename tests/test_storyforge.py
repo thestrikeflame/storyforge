@@ -530,5 +530,87 @@ class CloudBackgrounds(unittest.TestCase):
             self.assertNotIn("test-token", log_file.read_text(errors="replace"), log_file.name)
 
 
+def drawing_payload(idea: str = "") -> dict:
+    import base64
+    from tests.fake_hf import tiny_png
+    hero = tiny_png(64)
+    jpeg = b"\xff\xd8\xff\xe0" + os.urandom(600)  # only the start of a JPEG is checked
+    return {
+        "hero_png": "data:image/png;base64," + base64.b64encode(hero).decode(),
+        "preview_jpeg": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+        "idea": idea,
+    }, hero
+
+
+class DrawnHero(unittest.TestCase):
+    """/draw: the child's drawing becomes the hero, described by a vision model, then page 1 starts."""
+
+    def setUp(self):
+        llm_mode("normal")
+        hf_mode("normal")
+        call("POST", f"{HF}/control", {"vision": "normal", "vision_models": []})
+
+    def test_1_draw_page_loads(self):
+        status, body = call("GET", f"{CLOUD}/draw")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Draw your hero", body)
+        for asset in ("draw.js", "draw.css"):
+            self.assertEqual(call("GET", f"{CLOUD}/static/{asset}")[0], 200)
+        self.assertIn(b'href="/draw"', call("GET", f"{CLOUD}/")[1])
+
+    def test_2_drawing_becomes_the_hero_of_a_new_story(self):
+        payload, hero = drawing_payload()
+        status, story = call("POST", f"{CLOUD}/api/stories/drawn", payload)
+        self.assertEqual(status, 201, story)
+        description = "a round orange cat with a tall green hat and a long striped tail"
+        self.assertEqual(story["hero_description"], description)
+        self.assertEqual(story["premise"], f"A story starring {description}")
+        self.assertEqual(len(story["segments"]), 1)
+        vision = call("GET", f"{HF}/state")[1]
+        self.assertEqual(vision["vision_models"], ["meta-llama/Llama-4-Scout-17B-16E-Instruct"])
+        self.assertTrue(vision["vision_had_image"])
+        # the saved drawing is served as this story's hero, byte for byte
+        status, png = call("GET", CLOUD + story["hero_url"])
+        self.assertEqual((status, png), (200, hero))
+        self.assertNotEqual(story["hero_url"].split("v=")[1], "0")
+        # the storyteller is told about the drawn hero, and keeps its look
+        page = wait_ready(story["id"], 0, CLOUD)
+        self.assertEqual(page["status"], "ready")
+        self.assertIn(f"The hero is a character the reader drew: {description}", call("GET", f"{LLM}/state")[1]["last_user"])
+        saved = json.loads((TMP / "cloud_data" / "sessions" / f"{story['id']}.json").read_text())
+        self.assertEqual(saved["character_look"], description)
+        self.assertEqual(saved["hero_description"], description)
+        self.assertTrue((TMP / "cloud_data" / "heroes" / f"{story['id']}.png").is_file())
+        call("POST", f"{CLOUD}/api/stories/{story['id']}/continue", {"kind": "continue", "after": 0})
+        wait_ready(story["id"], 1, CLOUD)
+        self.assertIn(f"Main character looks like: {description}", call("GET", f"{LLM}/state")[1]["last_user"])
+
+    def test_3_next_vision_model_is_tried_and_the_story_starts_even_without_one(self):
+        call("POST", f"{HF}/control", {"vision": "first_fails", "vision_models": []})
+        status, story = call("POST", f"{CLOUD}/api/stories/drawn", drawing_payload("a trip to the moon")[0])
+        self.assertEqual(status, 201)
+        self.assertEqual(call("GET", f"{HF}/state")[1]["vision_models"],
+                         ["meta-llama/Llama-4-Scout-17B-16E-Instruct", "google/gemma-3-27b-it"])
+        self.assertTrue(story["hero_description"].startswith("a round orange cat"))
+        self.assertEqual(story["premise"], "a trip to the moon")  # the reader's own idea is kept
+        call("POST", f"{HF}/control", {"vision": "down", "vision_models": []})
+        status, story = call("POST", f"{CLOUD}/api/stories/drawn", drawing_payload()[0])
+        self.assertEqual(status, 201)
+        self.assertEqual(story["hero_description"], "a brave little hero in bright colours")
+        self.assertEqual(wait_ready(story["id"], 0, CLOUD)["status"], "ready")
+
+    def test_4_bad_drawings_are_rejected(self):
+        payload = drawing_payload()[0]
+        for broken in (
+            dict(payload, hero_png="data:image/png;base64," + "QUJD" * 40),  # not a PNG
+            dict(payload, preview_jpeg=payload["hero_png"]),                  # not a JPEG
+            dict(payload, hero_png="!!!not base64!!!" * 10),
+            {"idea": "no pictures"},
+        ):
+            status, body = call("POST", f"{CLOUD}/api/stories/drawn", broken)
+            self.assertEqual(status, 422, body)
+            self.assertIn("message", body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

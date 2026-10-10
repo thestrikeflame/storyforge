@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#12102b">
+<title>Draw your hero · StoryForge</title>
+<link rel="icon" href="/static/art/icon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/fraunces-latin-soft.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/draw.css">
+</head>
+<body>
+  <canvas id="canvas" aria-label="Drawing paper. Draw your hero here with your finger, a pen or the mouse."></canvas>
+  <p class="hint" id="hint" aria-hidden="true">Draw your hero!</p>
+
+  <header class="bar bar-top">
+    <a class="back" href="/" aria-label="Back to StoryForge">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l-8 8 8 8"/></svg>
+    </a>
+    <h1>Draw your hero</h1>
+    <button class="done" id="done" type="button" disabled>Done</button>
+  </header>
+
+  <footer class="bar bar-bottom">
+    <div class="colors" role="radiogroup" aria-label="Colours" id="colors">
+      <button type="button" role="radio" aria-checked="true" aria-label="Black" data-color="#2c2340"></button>
+      <button type="button" role="radio" aria-checked="false" aria-label="Red" data-color="#e53935"></button>
+      <button type="button" role="radio" aria-checked="false" aria-label="Yellow" data-color="#fbc02d"></button>
+      <button type="button" role="radio" aria-checked="false" aria-label="Green" data-color="#43a047"></button>
+      <button type="button" role="radio" aria-checked="false" aria-label="Blue" data-color="#1e88e5"></button>
+      <button type="button" role="radio" aria-checked="false" aria-label="Purple" data-color="#8e24aa"></button>
+    </div>
+    <div class="tools">
+      <button class="tool" id="undo" type="button" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+        <span>Undo</span>
+      </button>
+      <button class="tool" id="clear" type="button" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>
+        <span>Clear</span>
+      </button>
+    </div>
+  </footer>
+
+  <div class="confirm" id="confirm" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
+      <p id="confirm-text">Clear the whole drawing?</p>
+      <div class="sheet-row">
+        <button class="ghost" id="confirm-no" type="button">Keep it</button>
+        <button class="primary" id="confirm-yes" type="button">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="busy" id="busy" hidden>
+    <div class="sheet" role="status" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="busy-text">Getting to know your hero…</p>
+      <p class="busy-error" id="busy-error" hidden></p>
+      <button class="primary" id="busy-retry" type="button" hidden>Try again</button>
+      <button class="ghost" id="busy-close" type="button" hidden>Keep drawing</button>
+    </div>
+  </div>
+
+<script src="/static/draw.js"></script>
+</body>
+</html>

@@ -68,8 +68,14 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
     page_number = len(ready) + 1
 
     if not ready:
+        hero = story.get("hero_description")
+        hero_line = (
+            f"The hero is a character the reader drew: {hero}. Make this character the main character, "
+            "keep exactly this look, and give it a fitting name.\n\n" if hero else ""
+        )
         user = (
             f"The reader's idea for the story:\n\"{story['premise']}\"\n\n"
+            + hero_line +
             "Write page 1 only. Introduce the main character and the place, and end on a moment "
             "of curiosity so the reader wants to decide what happens next. Do not resolve anything.\n\n"
             "Use these JSON keys in this order:\n"

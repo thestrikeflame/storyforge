@@ -1,0 +1,171 @@
+/* StoryForge: the hero drawing page. Same palette and display font as the storybook. */
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("/static/fonts/fraunces-latin-soft.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  --night: #12102b;
+  --gold: #f4c76b;
+  --gold-bright: #ffe3a1;
+  --parchment: #f4e8cf;
+  --paper: #fffaf0;
+  --ink: #2c2340;
+  --ink-soft: #645875;
+  --mist: #d6cdec;
+  --display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+  --pad: max(12px, env(safe-area-inset-left));
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--display);
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none;
+}
+
+/* The paper fills the whole screen; the bars float above it. */
+#canvas {
+  position: fixed; inset: 0;
+  width: 100vw; height: 100dvh;
+  touch-action: none;
+  cursor: crosshair;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(44, 35, 64, .07) 1px, transparent 1.5px) 0 0 / 28px 28px,
+    var(--paper);
+}
+
+.hint {
+  position: fixed; inset: 0;
+  display: grid; place-items: center;
+  margin: 0;
+  font-size: clamp(1.6rem, 6vw, 3rem);
+  font-weight: 560;
+  color: rgba(44, 35, 64, .18);
+  pointer-events: none;
+  transition: opacity .4s var(--ease);
+}
+.hint.gone { opacity: 0; }
+
+.bar {
+  position: fixed; left: 0; right: 0;
+  display: flex; align-items: center; gap: 12px;
+  padding-inline: var(--pad);
+  pointer-events: none; /* only the controls take touches, so the edges stay drawable */
+}
+.bar > * { pointer-events: auto; }
+.bar-top { top: 0; padding-top: max(10px, env(safe-area-inset-top)); justify-content: space-between; }
+.bar-bottom {
+  bottom: 0; padding-bottom: max(12px, env(safe-area-inset-bottom));
+  justify-content: space-between; flex-wrap: wrap; row-gap: 10px;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.15rem, 3.4vw, 1.6rem);
+  font-weight: 600;
+  padding: .3em .9em;
+  border-radius: 999px;
+  background: rgba(255, 250, 240, .86);
+  pointer-events: none;
+}
+
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, a:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+
+.back {
+  display: grid; place-items: center;
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--night); color: var(--parchment);
+}
+.back svg, .tool svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+
+.done, .primary {
+  border: 0; border-radius: 999px;
+  padding: .55em 1.5em;
+  background: var(--gold); color: var(--ink);
+  font-size: clamp(1.2rem, 3.4vw, 1.5rem); font-weight: 640;
+  box-shadow: 0 0 0 2px var(--ink);
+  transition: transform .15s var(--ease), background .15s;
+}
+.done:hover:not(:disabled), .primary:hover { background: var(--gold-bright); }
+.done:active:not(:disabled), .primary:active { transform: translateY(1px); }
+.done:disabled { background: #e8e0cf; color: rgba(44, 35, 64, .45); box-shadow: 0 0 0 2px rgba(44, 35, 64, .2); cursor: default; }
+
+.colors {
+  display: flex; gap: clamp(8px, 2vw, 14px);
+  padding: 8px; border-radius: 999px;
+  background: rgba(255, 250, 240, .9);
+  box-shadow: 0 2px 14px rgba(44, 35, 64, .16);
+}
+.colors button {
+  width: clamp(46px, 11vw, 64px); aspect-ratio: 1;
+  border: 0; border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: 0 0 0 2px rgba(44, 35, 64, .25) inset;
+  transition: transform .15s var(--ease), box-shadow .15s;
+}
+.colors button[aria-checked="true"] {
+  transform: scale(1.12);
+  box-shadow: 0 0 0 4px var(--paper), 0 0 0 7px var(--ink);
+}
+
+.tools { display: flex; gap: 10px; }
+.tool {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  min-width: 70px; padding: 8px 10px;
+  border: 0; border-radius: 18px;
+  background: rgba(255, 250, 240, .9);
+  box-shadow: 0 2px 14px rgba(44, 35, 64, .16);
+  font-size: .95rem; font-weight: 560;
+}
+.tool:disabled { opacity: .4; cursor: default; }
+
+.confirm, .busy {
+  position: fixed; inset: 0;
+  display: grid; place-items: center;
+  padding: 20px;
+  background: rgba(18, 16, 43, .55);
+}
+.sheet {
+  width: min(420px, 100%);
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  padding: 28px 24px;
+  border-radius: 22px;
+  background: var(--parchment);
+  text-align: center;
+  font-size: 1.3rem; font-weight: 560;
+}
+.sheet p { margin: 0; }
+.sheet-row { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+.ghost {
+  border: 0; border-radius: 999px; padding: .55em 1.3em;
+  background: transparent; box-shadow: 0 0 0 2px var(--ink);
+  font-size: 1.1rem; font-weight: 600;
+}
+.busy-error { font-size: 1.05rem; color: var(--ink-soft); }
+.spinner {
+  width: 54px; height: 54px; border-radius: 50%;
+  border: 6px solid rgba(44, 35, 64, .15); border-top-color: var(--gold);
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 520px) {
+  .bar-bottom { justify-content: center; }
+  .tool { min-width: 64px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

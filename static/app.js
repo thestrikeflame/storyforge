@@ -957,17 +957,34 @@
       const button = $("resume");
       button.textContent = data.title ? `Continue “${data.title}”` : "Continue your story";
       button.hidden = false;
-      button.onclick = () => {
-        state.chooseNow.clear();
-        shownText = shownPicture = shownChoices = null;
-        adoptStory(data);
-        state.view = lastIndex();
-        setView("reading");
-        renderAll();
-        watch();
-      };
+      button.onclick = () => openStory(data);
     } catch (_) {
       store(STORAGE_STORY, null);
+    }
+  }
+
+  function openStory(data) {
+    state.chooseNow.clear();
+    shownText = shownPicture = shownChoices = null;
+    adoptStory(data);
+    state.view = lastIndex();
+    setView("reading");
+    renderAll();
+    watch();
+  }
+
+  // /draw sends the reader here as /?story=<id> once their hero's story has started.
+  async function openFromAddress() {
+    const id = new URLSearchParams(location.search).get("story");
+    if (!id) return false;
+    history.replaceState(null, "", "/"); // a reload later shows the cover with "Continue" instead
+    if (!/^[a-f0-9]{16}$/.test(id)) return false;
+    try {
+      openStory(await api("GET", `/api/stories/${id}`));
+      return true;
+    } catch (_) {
+      toast("That story could not be opened. Start a new one, or try again.", true);
+      return false;
     }
   }
 
@@ -1078,6 +1095,6 @@
       photo.onload = () => { photo.hidden = false; $("cover").classList.add("has-photo"); };
       photo.src = state.config.landing_art;
     }
-    offerResume();
+    if (!(await openFromAddress())) offerResume();
   })();
 })();
