@@ -174,7 +174,9 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
             "url": f"/api/stories/{story['id']}/segments/{seg['index']}/image?v={image.get('attempts', 0)}"
             if has_image
             else None,
-            "alt": seg.get("setting") or seg.get("visual_prompt") or "",
+            "alt": "a quiet storybook forest" if image.get("source") == "preset"
+            else seg.get("setting") or seg.get("visual_prompt") or "",
+            "preset": image.get("source") == "preset",  # a ready-made forest, not painted for this page
             "eta_seconds": image_eta,
         },
     }

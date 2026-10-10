@@ -333,10 +333,12 @@ class Flow(unittest.TestCase):
         story_id = new_story()
         wait_ready(story_id, 0)
         image = wait_image(story_id, 0)["image"]
-        self.assertEqual(image["status"], "failed")
-        self.assertEqual(image["error"], "out_of_memory")
-        self.assertIsNone(image["url"])
-        self.assertEqual(call("GET", f"{BASE}/api/stories/{story_id}/segments/0/image")[0], 404)
+        # nothing could paint it, so a ready-made forest is shown instead of no picture
+        self.assertEqual(image["status"], "completed")
+        self.assertTrue(image["preset"])
+        status, jpg = call("GET", BASE + image["url"])
+        self.assertEqual((status, jpg[:3]), (200, b"\xff\xd8\xff"))
+        self.assertIn(jpg, [p.read_bytes() for p in (ROOT / "static" / "art").glob("fallback-forest-*.jpg")])
         # the story carries on regardless
         status, _ = call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "after": 0})
         self.assertEqual(status, 201)
@@ -345,7 +347,9 @@ class Flow(unittest.TestCase):
         wait_image(story_id, 1)
         FAIL_FILE.unlink()
         call("POST", f"{BASE}/api/stories/{story_id}/segments/0/image/retry")
-        self.assertEqual(wait_image(story_id, 0)["image"]["status"], "completed")
+        image = wait_for(lambda: (s := segment(story_id, 0))["image"]["status"] == "completed"
+                         and not s["image"]["preset"] and s)["image"]
+        self.assertEqual(call("GET", BASE + image["url"])[1][:8], b"\x89PNG\r\n\x1a\n")  # painted for real
 
     def test_08_server_stays_responsive_while_generating(self):
         llm_mode("normal", delay=0.03)
@@ -500,13 +504,17 @@ class CloudBackgrounds(unittest.TestCase):
         story_id = new_story(base=CLOUD)
         wait_ready(story_id, 0, CLOUD)
         image = wait_image(story_id, 0, CLOUD)["image"]
-        self.assertEqual(image["status"], "failed")
+        self.assertEqual(image["status"], "completed")
+        self.assertTrue(image["preset"])  # neither painter worked: a preset forest
+        self.assertEqual(image["alt"], "a quiet storybook forest")
         self.assertEqual(len(self.sd_rows(story_id)), 1)
         FAIL_FILE.unlink()
         hf_mode("normal")
         before = call("GET", f"{HF}/state")[1]["requests"]
         call("POST", f"{CLOUD}/api/stories/{story_id}/segments/0/image/retry")
-        self.assertEqual(wait_image(story_id, 0, CLOUD)["image"]["status"], "completed")
+        image = wait_for(lambda: (s := segment(story_id, 0, CLOUD))["image"]["status"] == "completed"
+                         and not s["image"]["preset"] and s)["image"]
+        self.assertIn("misty enchanted forest", image["alt"])
         self.assertGreater(call("GET", f"{HF}/state")[1]["requests"], before)
         self.assertEqual(len(self.sd_rows(story_id)), 1)  # the cloud painted it this time
 

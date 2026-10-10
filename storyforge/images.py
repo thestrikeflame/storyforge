@@ -9,6 +9,9 @@ IMAGE_MODE=huggingface (default):
   * A request is given up after HF_TIMEOUT_SECONDS. On any failure the page falls back to the
     local queue below (HF_FALLBACK_LOCAL=1), but only once Qwen has finished the page.
 
+When neither the cloud nor the Jetson can paint a page, it gets one of the preset forest
+backgrounds in static/art/fallback-forest-*.jpg instead of no picture (except IMAGE_MODE=off).
+
 IMAGE_MODE=local, and the fallback, use the queue in front of sd-cli:
 
 Design choices for an 8 GB Jetson:
@@ -45,6 +48,11 @@ from .sysinfo import log, memory_mb, timings
 IMAGE_MODES = ("huggingface", "local", "off")
 # Added to every background prompt; the hero is drawn by the child, never painted.
 NO_CHARACTERS = "scenery only, empty landscape, no people, no animals, no characters"
+
+
+def preset_backgrounds() -> list[Path]:
+    """The ready-made forest backgrounds used when no picture can be painted."""
+    return sorted((settings.static_dir / "art").glob("fallback-forest-*.jpg"))
 
 _PROGRESS = re.compile(rb"(\d+)/(\d+)\s*-\s*[\d.]+\s*(?:s/it|it/s)")
 # Lines in sd-cli's output that say how long each stage took; copied into the log.
@@ -187,13 +195,18 @@ class ImageWorker:
         Cloud backgrounds start at once (even while the page is being written). Local ones only
         start once the page is ready, so sd-cli never competes with Qwen for the GPU."""
         image = seg["image"]
+        if retry and image["status"] == "completed" and image.get("source") == "preset":
+            image.update(status="none", file=None, source=None)  # try for a real painting again
         if image["status"] in ("queued", "generating", "completed"):
             return False
         if retry:
             image.pop("hf_failed", None)  # a retry asks the cloud again first
         ok, reason = self.availability()
         if not ok:
-            image.update(status="skipped" if reason == "disabled" else "failed", error=reason, progress=0.0)
+            if reason == "disabled":
+                image.update(status="skipped", error=reason, progress=0.0)
+            else:
+                self.use_preset(story, seg, reason)
             return False
         if settings.image_mode == "huggingface" and settings.hf_token and not image.get("hf_failed"):
             image.update(status="generating", progress=0.05, error=None)
@@ -202,7 +215,7 @@ class ImageWorker:
             self._hf_tasks[key] = asyncio.create_task(self._paint_in_cloud(story, seg), name=f"hf-{key}")
             return True
         if settings.image_mode == "huggingface" and not self.local_fallback_ok():
-            image.update(status="failed", error=image.get("error") or "failed", progress=0.0)
+            self.use_preset(story, seg, image.get("error") or "failed")
             return False
         if seg["status"] != "ready":
             return False  # local painting waits for the page; write_segment calls enqueue again
@@ -304,8 +317,21 @@ class ImageWorker:
         else:
             log.warning("cloud background failed  story=%s page=%d  reason=%s after %.1fs",
                         story["id"], page, reason, seconds)
-            image.update(status="failed", error=reason, progress=0.0)
+            self.use_preset(story, seg, reason)
         self._on_change(story)
+
+    def use_preset(self, story: dict, seg: dict, reason: str) -> None:
+        """Nothing could paint this page: show a ready-made forest instead of no picture.
+        The same story and page always get the same one. Without presets the page stays unpainted."""
+        image = seg["image"]
+        presets = preset_backgrounds()
+        if not presets:
+            image.update(status="failed", error=reason, progress=0.0)
+            return
+        name = presets[(int(story.get("seed", 0)) + seg["index"]) % len(presets)].name
+        image.update(status="completed", progress=1.0, error=None, file=name, source="preset", preset_reason=reason)
+        log.info("preset background used  story=%s page=%d  %s  (no painting: %s)",
+                 story["id"], seg["index"] + 1, name, reason)
 
     # ---- worker ----
 
@@ -327,7 +353,7 @@ class ImageWorker:
                 raise
             except Exception:  # never let one bad job stop the worker
                 log.exception("unexpected error while painting story=%s page=%s", story["id"], seg["index"] + 1)
-                seg["image"].update(status="failed", error="failed")
+                self.use_preset(story, seg, "failed")
             finally:
                 self._current = None
                 self._process = None
@@ -384,8 +410,8 @@ class ImageWorker:
                 "picture skipped  story=%s page=%d  only %d MB free (need %d MB, SD_MIN_FREE_MB)",
                 story["id"], page, mem_before["available"], settings.sd_min_free_mb,
             )
-            image.update(status="failed", error="low_memory", progress=0.0)
             timings.record("image", ok=False, reason="low_memory", free_mb=mem_before["available"])
+            self.use_preset(story, seg, "low_memory")
             return
 
         final_path = settings.image_dir / f"sf_{story['id']}_{seg['index']}.png"
@@ -434,7 +460,10 @@ class ImageWorker:
 
         tmp_path.unlink(missing_ok=True)
         reason = result["reason"]
-        image.update(status="failed", error=reason, progress=0.0, seconds=seconds)
+        if reason == "cancelled":
+            image.update(status="failed", error=reason, progress=0.0, seconds=seconds)
+        else:
+            self.use_preset(story, seg, reason)
         timings.record("image", ok=False, reason=reason, seconds=seconds, free_mb_lowest=result["lowest_free"])
         if reason != "cancelled":
             log.error(

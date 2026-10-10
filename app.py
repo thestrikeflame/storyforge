@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from storyforge import llm, speech, tls_proxy
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
-from storyforge.images import ImageWorker
+from storyforge.images import ImageWorker, preset_backgrounds
 from storyforge.store import StoryStore, hero_path, new_segment, new_story, segment_view, story_view
 from storyforge.sysinfo import log, memory_mb, setup_logging, timings
 
@@ -387,7 +387,8 @@ async def retry_segment(story_id: str, index: int):
 async def retry_image(story_id: str, index: int):
     story = _story_or_404(story_id)
     seg = _segment_or_404(story, index)
-    if seg["status"] == "ready" and seg["image"]["status"] in ("failed", "none"):
+    image = seg["image"]
+    if seg["status"] == "ready" and (image["status"] in ("failed", "none") or image.get("source") == "preset"):
         worker.enqueue(story, seg, retry=True)  # refuses duplicates by itself
         store.save(story)
     return _no_store(segment_view(story, seg, worker.eta_seconds()))
@@ -397,6 +398,12 @@ async def retry_image(story_id: str, index: int):
 async def get_image(story_id: str, index: int):
     story = _story_or_404(story_id)
     seg = _segment_or_404(story, index)
+    if seg["image"]["status"] == "completed" and seg["image"].get("source") == "preset":
+        # Only a name from the known list of preset files is ever served.
+        preset = next((p for p in preset_backgrounds() if p.name == seg["image"].get("file")), None)
+        if preset is None:
+            raise HTTPException(404, "This page has no picture yet.")
+        return FileResponse(preset, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
     # The file name is rebuilt on the server from validated values; the browser never supplies a path.
     kind = "jpg" if str(seg["image"].get("file") or "").endswith(".jpg") else "png"
     path = settings.image_dir / f"sf_{story['id']}_{seg['index']}.{kind}"
