@@ -21,6 +21,10 @@
   --pad: max(12px, env(safe-area-inset-left));
 }
 
+/* Overlays below use display: grid, which would otherwise beat the hidden attribute
+   (the loading screen then covers the paper from the start). Same rule as style.css. */
+[hidden] { display: none !important; }
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {

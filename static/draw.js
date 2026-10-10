@@ -10,6 +10,7 @@
   const canvas = $("canvas");
   const ctx = canvas.getContext("2d");
   const STORAGE_STORY = "storyforge.story"; // the same key the storybook uses to reopen a story
+  const GIVE_UP_MS = 45000; // the loading screen never waits longer than this
 
   const state = {
     strokes: [],        // [{ color, width, points: [[x, y], ...] }] in CSS pixels
@@ -213,11 +214,12 @@
     if (!state.strokes.length || state.sending) return;
     state.sending = true;
     refreshButtons();
-    showBusy("Getting to know your hero…");
-    const slow = setTimeout(() => { $("busy-text").textContent = "Writing the first page…"; }, 5000);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
+    const timer = setTimeout(() => controller.abort(), GIVE_UP_MS);
+    let slow = null;
     try {
+      showBusy("Getting to know your hero…");
+      slow = setTimeout(() => { $("busy-text").textContent = "Writing the first page…"; }, 5000);
       const payload = {
         hero_png: render(768).toDataURL("image/png"),
         preview_jpeg: render(512, "#ffffff").toDataURL("image/jpeg", 0.85),
@@ -238,11 +240,12 @@
       state.sending = false;
       refreshButtons();
       const message = error.name === "AbortError"
-        ? "The storyteller took too long to answer. Try again."
+        ? "That took a little too long. Your drawing is safe."
         : !navigator.onLine ? "You seem to be offline. Check the connection and try again."
-        : error.message === "Failed to fetch" ? "StoryForge is not answering. Check that it is running, then try again."
+        // A dropped connection is a TypeError ("Failed to fetch" in Chrome, "NetworkError…" in Firefox).
+        : error instanceof TypeError ? "StoryForge is not answering. Check that it is running, then try again."
         : error.message;
-      showBusy("Your hero is still here.", message);
+      showBusy("Hmm, that didn't work.", message);
       $("busy-retry").focus();
     } finally {
       clearTimeout(slow);

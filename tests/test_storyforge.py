@@ -556,6 +556,9 @@ class DrawnHero(unittest.TestCase):
         self.assertIn(b"Draw your hero", body)
         for asset in ("draw.js", "draw.css"):
             self.assertEqual(call("GET", f"{CLOUD}/static/{asset}")[0], 200)
+        # Without this rule the loading overlay (display: grid) shows from the start and covers the paper.
+        self.assertIn(b"[hidden] { display: none !important; }", call("GET", f"{CLOUD}/static/draw.css")[1])
+        self.assertIn(b"GIVE_UP_MS = 45000", call("GET", f"{CLOUD}/static/draw.js")[1])
         self.assertIn(b'href="/draw"', call("GET", f"{CLOUD}/")[1])
 
     def test_2_drawing_becomes_the_hero_of_a_new_story(self):
