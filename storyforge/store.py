@@ -23,6 +23,11 @@ KEEP_DAYS = 14
 _RUNTIME_KEYS = ("partial", "text_complete")
 
 
+def hero_path(story_id: str) -> Path:
+    """Where the child's hero drawing for a story is kept (a transparent PNG, made on /draw)."""
+    return settings.data_dir / "heroes" / f"{story_id}.png"
+
+
 def new_image_state() -> dict:
     return {"status": "none", "progress": 0.0, "error": None, "file": None, "seconds": None, "attempts": 0}
 
@@ -35,6 +40,7 @@ def new_segment(index: int, action: str | None, kind: str) -> dict:
         "partial": "",
         "text_complete": False,
         "visual_prompt": "",
+        "setting": "",  # where this page happens; the background is painted from it
         "choices": [],
         "action": action,  # the reader's decision that led to this page
         "kind": kind,  # opening | choice | custom | continue | finish
@@ -62,6 +68,7 @@ def new_story(premise: str) -> dict:
         "ended": False,
         "abandoned": False,
         "seed": secrets.randbelow(2_000_000_000),  # same seed for every picture keeps the style steadier
+        "hero": None,  # set (to a version number) once the child has drawn the hero on /draw
     }
 
 
@@ -137,6 +144,7 @@ class StoryStore:
                 for folder in (settings.image_dir, settings.data_dir / "audio"):
                     for extra in folder.glob(f"sf_{story_id}_*"):
                         extra.unlink(missing_ok=True)
+                hero_path(story_id).unlink(missing_ok=True)
                 path.unlink(missing_ok=True)
                 removed += 1
             except OSError:
@@ -166,7 +174,7 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
             "url": f"/api/stories/{story['id']}/segments/{seg['index']}/image?v={image.get('attempts', 0)}"
             if has_image
             else None,
-            "alt": seg.get("visual_prompt") or "",
+            "alt": seg.get("setting") or seg.get("visual_prompt") or "",
             "eta_seconds": image_eta,
         },
     }
@@ -178,5 +186,7 @@ def story_view(story: dict, image_eta: float | None = None) -> dict:
         "title": story.get("title") or "",
         "premise": story["premise"],
         "ended": bool(story.get("ended")),
+        # Always answers: the child's drawing, or the placeholder hero until one is drawn.
+        "hero_url": f"/api/stories/{story['id']}/hero?v={story.get('hero') or 0}",
         "segments": [segment_view(story, seg, image_eta) for seg in story["segments"]],
     }

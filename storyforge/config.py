@@ -1,4 +1,5 @@
-"""Settings. Values come from settings.env, and environment variables override them."""
+"""Settings. Values come from settings.env, then .env (secrets such as HF_TOKEN), and
+environment variables override both. .env is never committed."""
 from __future__ import annotations
 
 import os
@@ -22,7 +23,10 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-_FILE = _read_env_file(Path(os.environ.get("STORYFORGE_SETTINGS", ROOT / "settings.env")))
+_FILE = {
+    **_read_env_file(Path(os.environ.get("STORYFORGE_SETTINGS", ROOT / "settings.env"))),
+    **_read_env_file(Path(os.environ.get("STORYFORGE_ENV_FILE", ROOT / ".env"))),
+}
 
 
 def _get(key: str, default: str) -> str:
@@ -74,7 +78,17 @@ class Settings:
     sd_prompt_words: int = _int("SD_PROMPT_WORDS", 34, 10, 60)
     sd_timeout: int = _int("SD_TIMEOUT_SECONDS", 600, 30, 3600)
     sd_min_free_mb: int = _int("SD_MIN_FREE_MB", 1200, 0, 16000)
-    images_enabled: bool = _get("IMAGES_ENABLED", "1") not in ("0", "false", "no", "off")
+    # Where page backgrounds come from: huggingface | local | off. IMAGES_ENABLED=0 still means off.
+    image_mode: str = (
+        "off" if _get("IMAGES_ENABLED", "1").lower() in ("0", "false", "no", "off")
+        else _get("IMAGE_MODE", "huggingface").lower()
+    )
+    hf_token: str = field(default=_get("HF_TOKEN", ""), repr=False)  # secret: lives in .env, never logged
+    hf_url: str = _get("HF_URL", "https://router.huggingface.co").rstrip("/")
+    hf_provider: str = _get("HF_PROVIDER", "nscale")
+    hf_image_model: str = _get("HF_IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell")
+    hf_timeout: int = _int("HF_TIMEOUT_SECONDS", 20, 5, 120)
+    hf_fallback_local: bool = _get("HF_FALLBACK_LOCAL", "1") not in ("0", "false", "no", "off")
 
     tts_mode: str = _get("TTS_MODE", "auto").lower()
     piper_bin: Path = Path(_get("PIPER_BIN", "/home/akw/jetson-ai/.venv/bin/piper"))

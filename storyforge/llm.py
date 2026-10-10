@@ -39,6 +39,11 @@ SYSTEM_PROMPT = (
     "Reply with one JSON object only, no other text."
 )
 
+# Asked for first, so the background can be painted while the rest of the page is written.
+_SETTING_KEY = (
+    '"setting": where THIS page happens, for the background painter: the place, time of day and '
+    "weather in at most 20 words. Only the place: no people, animals or characters.\n"
+)
 _COMMON_KEYS = (
     '"visual_prompt": at most 20 words for the illustrator: ONE main character (say what it looks '
     "like, never its name), doing ONE thing, in ONE place. Simple and concrete, no feelings.\n"
@@ -69,6 +74,7 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             "of curiosity so the reader wants to decide what happens next. Do not resolve anything.\n\n"
             "Use these JSON keys in this order:\n"
             '"title": a title for the story, at most 6 words.\n'
+            + _SETTING_KEY +
             '"segment": the text of page 1.\n'
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
@@ -101,6 +107,7 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             f"The reader decided: \"{decision}\"\n\n"
             f"{task}\n\n"
             "Use these JSON keys in this order:\n"
+            + _SETTING_KEY +
             f'"segment": the text of page {page_number}.\n'
             + _COMMON_KEYS + choices_key + _SUMMARY_KEY
         )
@@ -112,6 +119,7 @@ def response_schema(first: bool, final: bool) -> dict:
     props: dict = {}
     if first:
         props["title"] = {"type": "string"}
+    props["setting"] = {"type": "string"}
     props["segment"] = {"type": "string"}
     if first:
         props["character_look"] = {"type": "string"}
@@ -405,6 +413,7 @@ class Page:
     title: str = ""
     character_look: str = ""
     world: str = ""
+    setting: str = ""
     used_fallback_choices: bool = False
     repaired: bool = False
 
@@ -416,7 +425,7 @@ def parse_page(raw: str, first: bool, final: bool) -> Page:
     if data is None:
         # Salvage field by field from broken JSON.
         data = {}
-        for key in ("title", "segment", "character_look", "world", "visual_prompt", "continuity_summary"):
+        for key in ("title", "setting", "segment", "character_look", "world", "visual_prompt", "continuity_summary"):
             value, _complete = extract_string_field(raw, key)
             if value:
                 data[key] = value
@@ -472,6 +481,7 @@ def parse_page(raw: str, first: bool, final: bool) -> Page:
         title=line("title", 70) if first else "",
         character_look=line("character_look", 180) if first else "",
         world=line("world", 180) if first else "",
+        setting=line("setting", 180),
         used_fallback_choices=used_fallback,
         repaired=repaired,
     )

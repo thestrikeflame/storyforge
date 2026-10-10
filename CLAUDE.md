@@ -2,25 +2,26 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-StoryForge is a self-hosted interactive storybook running on a Jetson Orin Nano (8 GB shared CPU/GPU memory, no swap, aarch64, no Docker). A local Qwen2.5-3B served by llama-server writes one page at a time, stable-diffusion.cpp paints the picture afterwards, and Piper or the browser narrates.
+StoryForge is a self-hosted interactive storybook running on a Jetson Orin Nano (8 GB shared CPU/GPU memory plus an 8 GB swap file, aarch64, no Docker). A local Qwen2.5-3B served by llama-server writes one page at a time, Hugging Face (or local stable-diffusion.cpp) paints a background for each page, and Piper or the browser narrates.
 
 ## Live server — teammates are using it
 
 - Never start, stop or restart the live StoryForge (port 8000) or llama-server (port 8080) without asking first. That includes `./scripts/start.sh` and `./scripts/stop.sh`, and `stop.sh --all` is especially risky.
 - To test changes, run a separate instance on port 8001 that reuses the live llama-server and loads no model of its own. Give it its own data and log folders and turn HTTPS off, otherwise it collides with the live instance's sessions, pid files and port 8443:
   ```
-  mkdir -p /tmp/sf-test/{data,logs}
-  PORT=8001 HTTPS_PORT=0 IMAGES_ENABLED=0 DATA_DIR=/tmp/sf-test/data LOG_DIR=/tmp/sf-test/logs \
+  mkdir -p /tmp/sf-test/{data,logs,images}
+  PORT=8001 HTTPS_PORT=0 IMAGE_MODE=huggingface HF_FALLBACK_LOCAL=0 \
+    DATA_DIR=/tmp/sf-test/data LOG_DIR=/tmp/sf-test/logs IMAGE_DIR=/tmp/sf-test/images \
     /home/akw/jetson-ai/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8001
   ```
   Stop only that process when you're done.
-- Only one GPU job can run at a time, and a picture alone takes free memory down to about 800 MB. Keep `IMAGES_ENABLED=0` on the test instance. Ask before generating images (including `./scripts/benchmark_sd.sh`) while the live server is busy.
+- Only one GPU job can run at a time, and a local picture alone takes free memory down to about 800 MB. Keep `HF_FALLBACK_LOCAL=0` (or `IMAGE_MODE=off`) on the test instance so it never runs sd-cli. Ask before generating images (including `./scripts/benchmark_sd.sh`) while the live server is busy.
 - Leave the old app files in `/home/akw/jetson-ai/` alone (`app.py`, `app_backup.py`, `storyforge_app_with_illustrations.py`, the zips). The old app also uses port 8000.
 
 ## Commands
 
 - Python env: the shared venv `/home/akw/jetson-ai/.venv`. There is no requirements.txt or pyproject. Dependencies are fastapi, uvicorn and pydantic, plus pillow for tests and piper-tts (optional).
-- Tests (plain unittest, using a fake llama-server and a fake `sd-cli`, no GPU, ports 18000/18080): `python3 tests/test_storyforge.py`. Single test: `python3 tests/test_storyforge.py Flow.test_02_only_the_opening_is_written`. The `Flow` tests are numbered and depend on running in order.
+- Tests (plain unittest, using a fake llama-server, fake Hugging Face router and fake `sd-cli`; no GPU, no internet; ports 18000/18001/18080/18091): `python3 tests/test_storyforge.py`. Single test: `python3 tests/test_storyforge.py Flow.test_02_only_the_opening_is_written`. The `Flow` tests are numbered and depend on running in order.
 - Fake-model demo: `./tests/run_demo.sh` (port 8010, fake LLM on 18090).
 - Health: `curl -s http://localhost:8000/api/health | python3 -m json.tool` (use 8001 for the test instance).
 - No formatter, linter or CI is configured.
@@ -30,7 +31,10 @@ StoryForge is a self-hosted interactive storybook running on a Jetson Orin Nano 
 - `app.py` is a FastAPI app with routes under `/api/...`. An `asyncio.Lock` allows only one page to be written at a time.
 - `storyforge/config.py` defines a frozen `Settings` dataclass. Values come from `settings.env`, env vars override them (`STORYFORGE_SETTINGS` points to a different file), and numbers are clamped. `scripts/_settings.sh` loads the same file for the shell scripts.
 - `storyforge/llm.py` uses stdlib `http.client` to call llama-server's `/v1/chat/completions`. Only a running summary and the latest page are sent, because llama-server runs with `-c 2048`. Prompts and the validation and repair of model replies live here too.
-- `storyforge/images.py` runs a single-worker queue. Each picture is a fresh `sd-cli` subprocess so memory is released afterwards (don't switch to a persistent sd-server). It checks free memory against `SD_MIN_FREE_MB` before starting, and fast mode (LCM-LoRA + TAESD) falls back to classic settings on failure.
+- Secrets (`HF_TOKEN`) live in `.env` (gitignored); everything else in `settings.env`. `config.py` reads both (env vars > `.env` > `settings.env`). Never log, print or return the token; `Settings.hf_token` is `repr=False`. Tests point `STORYFORGE_ENV_FILE` at a fake file so the real key is never used.
+- Pictures are page *backgrounds only* (no characters). The child's hero drawing (`/api/stories/{id}/hero`, placeholder `static/art/hero-placeholder.png` until `/draw` exists) is layered on top in the browser. `IMAGE_MODE=huggingface|local|off`.
+- Cloud mode (`storyforge/hf_images.py`): FLUX.1-schnell via the `nscale` provider at `router.huggingface.co/nscale/v1/images/generations` (the `hf-inference` provider returns 410 for this model). The LLM's `setting` key comes first in its JSON, so the background starts while Qwen is still writing; 20 s limit, then local fallback once the page is ready.
+- `storyforge/images.py` runs a single-worker queue for local sd-cli. Each picture is a fresh `sd-cli` subprocess so memory is released afterwards (don't switch to a persistent sd-server). It checks free memory against `SD_MIN_FREE_MB` before starting, and fast mode (LCM-LoRA + TAESD) falls back to classic settings on failure.
 - Keep `SD_EXTRA_ARGS` (`--diffusion-fa --vae-tiling --backend te=cpu --max-vram 0`) unless a benchmark shows a change is better.
 - `data/` and `logs/` hold live runtime state (sessions, pid files, `timings.jsonl`), not source.
 

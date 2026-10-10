@@ -374,6 +374,19 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
 }
 .picture img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; }
 .picture[data-state="completed"] img { opacity: 1; animation: reveal 1.1s var(--ease) both; }
+/* The hero drawing stands on the background, gently bobbing. It can be swapped or animated
+   without repainting anything, because the background never contains a character. */
+.picture .hero {
+  inset: auto auto 4% 50%; width: auto; height: 50%; max-width: 70%; object-fit: contain;
+  transform: translateX(-50%); transform-origin: 50% 100%;
+  filter: drop-shadow(0 6px 6px rgba(44, 35, 64, .35));
+  pointer-events: none; user-select: none;
+}
+.picture[data-state="completed"] .hero {
+  animation: hero-in .7s var(--ease) .5s both, hero-bob 3.2s ease-in-out 1.2s infinite;
+}
+@keyframes hero-in { from { opacity: 0; transform: translateX(-50%) translateY(14%) scale(.9); } to { opacity: 1; transform: translateX(-50%); } }
+@keyframes hero-bob { 0%, 100% { opacity: 1; transform: translateX(-50%); } 50% { opacity: 1; transform: translateX(-50%) translateY(-3%) rotate(-1.5deg); } }
 @keyframes reveal { from { clip-path: circle(0% at 50% 55%); opacity: .4; } to { clip-path: circle(75% at 50% 55%); opacity: 1; } }
 
 .painting, .unpainted {

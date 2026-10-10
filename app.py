@@ -26,7 +26,7 @@ from storyforge import llm, speech, tls_proxy
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
 from storyforge.images import ImageWorker
-from storyforge.store import StoryStore, new_segment, new_story, segment_view, story_view
+from storyforge.store import StoryStore, hero_path, new_segment, new_story, segment_view, story_view
 from storyforge.sysinfo import log, memory_mb, setup_logging, timings
 
 ERRORS = {
@@ -56,7 +56,7 @@ async def lifespan(_app: FastAPI):
     mem = memory_mb()
     log.info(
         "StoryForge started  port=%d  pictures=%s  narration=%s  offline voice input=%s  free memory=%d of %d MB",
-        settings.port, "ready" if ok else reason, speech.tts_mode(),
+        settings.port, worker.describe_mode() if ok else reason, speech.tts_mode(),
         "yes" if speech.stt_available() else "no", mem["available"], mem["total"],
     )
     if mem["total"] and not mem["swap_total"]:
@@ -84,7 +84,14 @@ app = FastAPI(title="StoryForge", lifespan=lifespan, docs_url=None, redoc_url=No
 
 def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: float) -> None:
     """Copy the story text that has arrived so far into the page, and announce the moment
-    the page text is complete so narration can start before the choices are even written."""
+    the page text is complete so narration can start before the choices are even written.
+    The page's "setting" streams in first: in cloud mode its background starts painting right away."""
+    if not seg.get("setting"):
+        setting, done = llm.extract_string_field(stream.raw, "setting")
+        if done and setting:
+            seg["setting"] = llm.clean_line(setting, 180)
+            if settings.image_mode == "huggingface":
+                worker.enqueue(story, seg)
     if seg["text_complete"]:
         return
     text, complete = llm.extract_string_field(stream.raw, "segment")
@@ -185,6 +192,8 @@ async def write_segment(story: dict, seg: dict) -> None:
         narrator.prepare(story["id"], seg["index"], seg["text"])
     seg["partial"] = ""
     seg["visual_prompt"] = page.visual_prompt
+    if page.setting and not seg.get("setting"):
+        seg["setting"] = page.setting
     seg["choices"] = page.choices
     seg["error"] = None
     seg["status"] = "ready"
@@ -228,8 +237,8 @@ async def write_segment(story: dict, seg: dict) -> None:
         fallback_choices=page.used_fallback_choices, repaired=page.repaired,
     )
     store.save(story)
-    # Only now, with Qwen idle again, does the picture start: the two never fight for the GPU
-    # unless the reader races ahead.
+    # A local picture starts only now, with Qwen idle again: the two never fight for the GPU
+    # unless the reader races ahead. (A cloud background usually started while writing.)
     worker.enqueue(story, seg)
     store.save(story)
 
@@ -379,7 +388,7 @@ async def retry_image(story_id: str, index: int):
     story = _story_or_404(story_id)
     seg = _segment_or_404(story, index)
     if seg["status"] == "ready" and seg["image"]["status"] in ("failed", "none"):
-        worker.enqueue(story, seg)  # refuses duplicates by itself
+        worker.enqueue(story, seg, retry=True)  # refuses duplicates by itself
         store.save(story)
     return _no_store(segment_view(story, seg, worker.eta_seconds()))
 
@@ -389,10 +398,22 @@ async def get_image(story_id: str, index: int):
     story = _story_or_404(story_id)
     seg = _segment_or_404(story, index)
     # The file name is rebuilt on the server from validated values; the browser never supplies a path.
-    path = settings.image_dir / f"sf_{story['id']}_{seg['index']}.png"
+    kind = "jpg" if str(seg["image"].get("file") or "").endswith(".jpg") else "png"
+    path = settings.image_dir / f"sf_{story['id']}_{seg['index']}.{kind}"
     if seg["image"]["status"] != "completed" or not path.is_file():
         raise HTTPException(404, "This page has no picture yet.")
-    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+    media = "image/jpeg" if kind == "jpg" else "image/png"
+    return FileResponse(path, media_type=media, headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/stories/{story_id}/hero")
+async def get_hero(story_id: str):
+    """The child's drawing of the hero (a transparent PNG), or the placeholder until /draw exists."""
+    story = _story_or_404(story_id)
+    path = hero_path(story["id"])
+    if not story.get("hero") or not path.is_file():
+        path = settings.static_dir / "art" / "hero-placeholder.png"
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/stories/{story_id}/segments/{index}/audio")
@@ -469,7 +490,8 @@ async def health():
         "ok": writer_ok,
         "story_writer": {"ok": writer_ok, "state": writer_state, "url": settings.llm_url},
         "pictures": {
-            "ok": images_ok, "state": images_reason, "mode": worker.describe_plan(worker.plan()),
+            "ok": images_ok, "state": images_reason, "mode": worker.describe_mode(),
+            "hf_key_set": bool(settings.hf_token), "local_fallback": worker.local_fallback_ok(),
             "size": f"{settings.sd_width}x{settings.sd_height}", "waiting_or_running": worker.queue_length(),
             "options_checked_against_help": worker.help_checked,
         },

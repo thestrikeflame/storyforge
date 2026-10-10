@@ -22,8 +22,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 APP_PORT, LLM_PORT = 18000, 18080
+CLOUD_PORT, HF_PORT = 18001, 18091  # a second StoryForge in Hugging Face mode, and a fake router
 BASE = f"http://127.0.0.1:{APP_PORT}"
 LLM = f"http://127.0.0.1:{LLM_PORT}"
+CLOUD = f"http://127.0.0.1:{CLOUD_PORT}"
+HF = f"http://127.0.0.1:{HF_PORT}"
 TMP = Path(tempfile.mkdtemp(prefix="storyforge_test_"))
 FAIL_FILE = TMP / "sd_should_fail"
 SD_LOG = TMP / "sd_calls.log"
@@ -64,24 +67,24 @@ def wait_for(check, timeout=40, every=0.15):
     raise AssertionError("timed out waiting")
 
 
-def segment(story_id: str, index: int) -> dict:
-    status, body = call("GET", f"{BASE}/api/stories/{story_id}/segments/{index}")
+def segment(story_id: str, index: int, base=BASE) -> dict:
+    status, body = call("GET", f"{base}/api/stories/{story_id}/segments/{index}")
     assert status == 200, (status, body)
     return body
 
 
-def wait_ready(story_id: str, index: int) -> dict:
-    return wait_for(lambda: (s := segment(story_id, index))["status"] in ("ready", "failed") and s)
+def wait_ready(story_id: str, index: int, base=BASE) -> dict:
+    return wait_for(lambda: (s := segment(story_id, index, base))["status"] in ("ready", "failed") and s)
 
 
-def wait_image(story_id: str, index: int) -> dict:
+def wait_image(story_id: str, index: int, base=BASE) -> dict:
     return wait_for(
-        lambda: (s := segment(story_id, index))["image"]["status"] in ("completed", "failed", "skipped") and s
+        lambda: (s := segment(story_id, index, base))["image"]["status"] in ("completed", "failed", "skipped") and s
     )
 
 
-def new_story(premise="A small purple dragon discovers a mysterious door in an enchanted forest") -> str:
-    status, body = call("POST", f"{BASE}/api/stories", {"premise": premise})
+def new_story(premise="A small purple dragon discovers a mysterious door in an enchanted forest", base=BASE) -> str:
+    status, body = call("POST", f"{base}/api/stories", {"premise": premise})
     assert status == 201, (status, body)
     return body["id"]
 
@@ -89,7 +92,9 @@ def new_story(premise="A small purple dragon discovers a mysterious door in an e
 def setUpModule():
     env = dict(
         os.environ,
-        STORYFORGE_SETTINGS=str(TMP / "none.env"),
+        # Neither the real settings.env nor the real .env (with the real key) is ever read here.
+        STORYFORGE_SETTINGS=str(TMP / "none.env"), STORYFORGE_ENV_FILE=str(TMP / "none.env"), HF_TOKEN="",
+        IMAGE_MODE="local",
         LLM_URL=LLM, PORT=str(APP_PORT), HTTPS_PORT="0",
         SD_CLI=str(ROOT / "tests" / "fake_sd_cli"), SD_MODEL=str(ROOT / "tests" / "fake_sd_cli"),
         IMAGE_DIR=str(TMP / "images"), DATA_DIR=str(TMP / "data"), LOG_DIR=str(TMP / "logs"),
@@ -99,14 +104,26 @@ def setUpModule():
         SD_LCM_LORA=str(FAST_DIR / "lcm-lora-sdv1-5.safetensors"), SD_TAESD=str(FAST_DIR / "taesd.safetensors"),
         FAKE_SD_FAIL_FAST_FILE=str(FAST_FAIL),
     )
+    # The cloud instance gets its key from a .env-style file, the way the real app does.
+    (TMP / "cloud.env").write_text("# test secrets\nHF_TOKEN=test-token\n")
+    cloud_env = dict(
+        env, IMAGE_MODE="huggingface", STORYFORGE_ENV_FILE=str(TMP / "cloud.env"),
+        HF_URL=HF, HF_TIMEOUT_SECONDS="5", HF_FALLBACK_LOCAL="1", PORT=str(CLOUD_PORT),
+        IMAGE_DIR=str(TMP / "cloud_images"), DATA_DIR=str(TMP / "cloud_data"), LOG_DIR=str(TMP / "cloud_logs"),
+    )
+    del cloud_env["HF_TOKEN"]
     procs.append(subprocess.Popen([sys.executable, str(ROOT / "tests" / "fake_llama.py"), str(LLM_PORT)]))
-    procs.append(subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(APP_PORT),
-         "--log-level", "warning"],
-        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-    ))
+    procs.append(subprocess.Popen([sys.executable, str(ROOT / "tests" / "fake_hf.py"), str(HF_PORT)]))
+    for port, app_env in ((APP_PORT, env), (CLOUD_PORT, cloud_env)):
+        procs.append(subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port),
+             "--log-level", "warning"],
+            cwd=ROOT, env=app_env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        ))
     wait_for(lambda: call("GET", f"{LLM}/health")[0] == 200 if _up(LLM_PORT) else False)
+    wait_for(lambda: _up(HF_PORT))
     wait_for(lambda: call("GET", f"{BASE}/api/config")[0] == 200 if _up(APP_PORT) else False)
+    wait_for(lambda: call("GET", f"{CLOUD}/api/config")[0] == 200 if _up(CLOUD_PORT) else False)
 
 
 def _up(port: int) -> bool:
@@ -158,6 +175,26 @@ class Parsing(unittest.TestCase):
         self.assertTrue(page.used_fallback_choices)
         page = parse_page(json.dumps({"segment": words, "choices": ["a b c"]}), False, True)
         self.assertEqual(page.choices, [])
+
+    def test_setting_comes_first_and_is_parsed(self):
+        from storyforge.llm import build_messages, parse_page, response_schema
+        self.assertEqual(list(response_schema(False, False)["properties"])[0], "setting")
+        self.assertEqual(list(response_schema(True, False)["properties"])[:2], ["title", "setting"])
+        story = {"premise": "p", "segments": []}
+        text = build_messages(story, None, False)[1]["content"]
+        self.assertLess(text.index('"setting"'), text.index('"segment"'))
+        words = " ".join(["word"] * 60) + "."
+        page = parse_page(json.dumps({"setting": "a windy hilltop at sunset", "segment": words}), False, False)
+        self.assertEqual(page.setting, "a windy hilltop at sunset")
+
+    def test_background_prompt_has_no_characters(self):
+        from storyforge.images import NO_CHARACTERS, ImageWorker
+        story = {"premise": "p", "world": "a forest", "character_look": "a purple dragon with wings"}
+        prompt = ImageWorker.build_background_prompt(story, {"setting": "a snowy village square at dusk"})
+        self.assertIn("a snowy village square at dusk", prompt)
+        self.assertIn(NO_CHARACTERS, prompt)
+        self.assertNotIn("dragon", prompt)
+        self.assertIn("a forest", ImageWorker.build_background_prompt(story, {}))  # no setting yet
 
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
@@ -404,6 +441,85 @@ class Flow(unittest.TestCase):
         page = wait_ready(story_id, 0)
         self.assertEqual(page["status"], "failed")
         self.assertIn("Try again", page["error"]["message"])
+
+
+def hf_mode(mode: str) -> None:
+    call("POST", f"{HF}/control", {"mode": mode})
+
+
+class CloudBackgrounds(unittest.TestCase):
+    """The second instance: IMAGE_MODE=huggingface against the fake router, falling back to the
+    fake local sd-cli. Its key comes from a .env-style file (STORYFORGE_ENV_FILE)."""
+
+    def setUp(self):
+        llm_mode("normal")
+        hf_mode("normal")
+        FAIL_FILE.unlink(missing_ok=True)
+
+    def sd_rows(self, story_id: str) -> list[str]:
+        return [r for r in SD_LOG.read_text().splitlines() if f"sf_{story_id}_" in r] if SD_LOG.exists() else []
+
+    def test_1_background_starts_while_the_page_is_written(self):
+        llm_mode("normal", delay=0.03)
+        before = call("GET", f"{HF}/state")[1]["requests"]
+        story_id = new_story(base=CLOUD)
+        # the setting streams in first, so the cloud is asked before the page is finished
+        wait_for(lambda: call("GET", f"{HF}/state")[1]["requests"] > before)
+        self.assertEqual(segment(story_id, 0, CLOUD)["status"], "writing")
+        state = call("GET", f"{HF}/state")[1]
+        self.assertEqual(state["last_path"], "/nscale/v1/images/generations")
+        self.assertIn("misty enchanted forest", state["last_prompt"])
+        self.assertIn("no characters", state["last_prompt"])
+        self.assertNotIn("dragon", state["last_prompt"])  # the hero is drawn by the child, never painted
+        page = wait_image(story_id, 0, CLOUD)
+        self.assertEqual(page["image"]["status"], "completed")
+        self.assertIn("misty enchanted forest", page["image"]["alt"])
+        status, png = call("GET", CLOUD + page["image"]["url"])
+        self.assertEqual((status, png[:8]), (200, b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(self.sd_rows(story_id), [])  # nothing painted on the Jetson
+        # the hero layer: the placeholder until /draw exists
+        status, story = call("GET", f"{CLOUD}/api/stories/{story_id}")
+        status, hero = call("GET", CLOUD + story["hero_url"])
+        self.assertEqual((status, hero[:8]), (200, b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(hero, (ROOT / "static" / "art" / "hero-placeholder.png").read_bytes())
+
+    def test_2_slow_cloud_gives_up_and_paints_locally(self):
+        hf_mode("slow")
+        story_id = new_story(base=CLOUD)
+        wait_ready(story_id, 0, CLOUD)
+        started = time.time()
+        page = wait_for(lambda: (s := segment(story_id, 0, CLOUD))["image"]["status"] == "completed" and s, timeout=30)
+        self.assertLess(time.time() - started, 15)
+        self.assertEqual(len(self.sd_rows(story_id)), 1)  # repainted by the local fallback
+        self.assertIn("no characters", self.sd_rows(story_id)[0])
+        hf_mode("normal")
+
+    def test_3_cloud_error_falls_back_and_retry_asks_the_cloud_again(self):
+        hf_mode("error500")
+        FAIL_FILE.write_text("fail")  # and the local painter fails too
+        story_id = new_story(base=CLOUD)
+        wait_ready(story_id, 0, CLOUD)
+        image = wait_image(story_id, 0, CLOUD)["image"]
+        self.assertEqual(image["status"], "failed")
+        self.assertEqual(len(self.sd_rows(story_id)), 1)
+        FAIL_FILE.unlink()
+        hf_mode("normal")
+        before = call("GET", f"{HF}/state")[1]["requests"]
+        call("POST", f"{CLOUD}/api/stories/{story_id}/segments/0/image/retry")
+        self.assertEqual(wait_image(story_id, 0, CLOUD)["image"]["status"], "completed")
+        self.assertGreater(call("GET", f"{HF}/state")[1]["requests"], before)
+        self.assertEqual(len(self.sd_rows(story_id)), 1)  # the cloud painted it this time
+
+    def test_4_key_is_loaded_from_env_file_and_never_shown(self):
+        status, health = call("GET", f"{CLOUD}/api/health")
+        self.assertTrue(health["pictures"]["hf_key_set"])
+        self.assertIn("huggingface", health["pictures"]["mode"])
+        story_id = new_story(base=CLOUD)
+        wait_image(story_id, 0, CLOUD)
+        pages = [call("GET", f"{CLOUD}/api/{p}")[1] for p in ("health", "config", f"stories/{story_id}")]
+        self.assertNotIn("test-token", json.dumps(pages))
+        for log_file in (TMP / "cloud_logs").glob("*"):
+            self.assertNotIn("test-token", log_file.read_text(errors="replace"), log_file.name)
 
 
 if __name__ == "__main__":

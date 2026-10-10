@@ -41,6 +41,8 @@ sf_*/
 *.jpg
 *.jpeg
 *.webp
+# ...except the app's own artwork
+!static/art/*
 *.wav
 *.mp3
 *.ogg

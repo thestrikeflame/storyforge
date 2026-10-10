@@ -638,11 +638,12 @@
     $("picture-meter-fill").style.transform = `scaleX(${status === "generating" ? image.progress || 0.02 : 0})`;
     $("picture-meter").setAttribute("aria-valuenow", String(Math.round((image.progress || 0) * 100)));
 
-    const key = `${state.story.id}:${page.index}:${page.status}:${status}:${image.url || ""}`;
+    const key = `${state.story.id}:${page.index}:${page.status}:${status}:${image.url || ""}:${state.story.heroUrl}`;
     if (key === shownPicture) return;
     shownPicture = key;
 
     const img = $("picture-img");
+    const hero = $("hero-img");
     if (status === "completed" && image.url) {
       // Load off-screen first. The page that asked for it may no longer be the one on show.
       const storyId = state.story.id;
@@ -651,7 +652,9 @@
       loader.onload = () => {
         if (!state.story || state.story.id !== storyId || state.view !== index) return;
         img.src = image.url;
-        img.alt = image.alt ? `Illustration: ${image.alt}` : "Illustration for this page";
+        img.alt = image.alt ? `Illustration: your hero in ${image.alt}` : "Illustration for this page";
+        // The background is scenery only; the same hero stands in every scene.
+        if (hero.getAttribute("src") !== state.story.heroUrl) hero.src = state.story.heroUrl;
         figure.dataset.state = "completed";
       };
       loader.onerror = () => {
@@ -780,6 +783,7 @@
       title: data.title,
       premise: data.premise,
       ended: data.ended,
+      heroUrl: data.hero_url || "/static/art/hero-placeholder.png",
       pages: data.segments.map((seg, i) => Object.assign({}, previous[i] ? { pictureBroken: previous[i].pictureBroken } : {}, seg)),
     };
     store(STORAGE_STORY, data.id);

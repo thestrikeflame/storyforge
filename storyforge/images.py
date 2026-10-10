@@ -1,4 +1,15 @@
-"""Illustration jobs: a queue in front of stable-diffusion.cpp's sd-cli.
+"""Page backgrounds: painted by Hugging Face in the cloud, or locally by stable-diffusion.cpp.
+
+Every picture is a BACKGROUND only (no characters): the child's hero drawing is layered on
+top of it in the browser, so the same hero appears in every scene.
+
+IMAGE_MODE=huggingface (default):
+  * The background is requested as soon as the page's "setting" has streamed in, so it is
+    painted in the cloud while Qwen is still writing. It uses no memory on the Jetson.
+  * A request is given up after HF_TIMEOUT_SECONDS. On any failure the page falls back to the
+    local queue below (HF_FALLBACK_LOCAL=1), but only once Qwen has finished the page.
+
+IMAGE_MODE=local, and the fallback, use the queue in front of sd-cli:
 
 Design choices for an 8 GB Jetson:
   * Exactly one picture is generated at a time. Two at once would exhaust shared memory.
@@ -27,8 +38,13 @@ import time
 from collections import deque
 from pathlib import Path
 
+from . import hf_images
 from .config import settings
 from .sysinfo import log, memory_mb, timings
+
+IMAGE_MODES = ("huggingface", "local", "off")
+# Added to every background prompt; the hero is drawn by the child, never painted.
+NO_CHARACTERS = "scenery only, empty landscape, no people, no animals, no characters"
 
 _PROGRESS = re.compile(rb"(\d+)/(\d+)\s*-\s*[\d.]+\s*(?:s/it|it/s)")
 # Lines in sd-cli's output that say how long each stage took; copied into the log.
@@ -44,6 +60,11 @@ MESSAGES = {
     "failed": "The picture could not be painted this time.",
     "interrupted": "Painting was interrupted.",
     "cancelled": "Painting was cancelled.",
+    "hf_no_token": "The cloud painter needs a Hugging Face key. Add HF_TOKEN to the .env file.",
+    "hf_unauthorized": "The cloud painter did not accept the Hugging Face key.",
+    "hf_busy": "The cloud painter is busy right now. Try again in a moment.",
+    "hf_offline": "The cloud painter could not be reached. Check the internet connection.",
+    "bad_mode": "IMAGE_MODE in settings.env should be huggingface, local or off.",
 }
 
 
@@ -59,6 +80,7 @@ class ImageWorker:
         self.supported_flags: set[str] = set()
         self.help_checked = False
         self.fast_disabled = False  # set when a fast-mode picture failed
+        self._hf_tasks: dict[tuple[str, int], asyncio.Task] = {}  # cloud backgrounds being painted
 
     # ---- lifecycle ----
 
@@ -68,6 +90,8 @@ class ImageWorker:
         self._task = asyncio.create_task(self._run(), name="image-worker")
 
     async def stop(self) -> None:
+        for task in list(self._hf_tasks.values()):
+            task.cancel()
         if self._task:
             self._task.cancel()
             try:
@@ -78,6 +102,12 @@ class ImageWorker:
 
     async def _inspect_cli(self) -> None:
         """Ask the installed sd-cli which options it understands instead of assuming."""
+        if settings.image_mode == "huggingface":
+            log.info(
+                "background mode: huggingface (%s via %s, %ds limit, key %s, local fallback %s)",
+                settings.hf_image_model, settings.hf_provider, settings.hf_timeout,
+                "set" if settings.hf_token else "MISSING", "on" if self.local_fallback_ok() else "off",
+            )
         if not settings.sd_cli.is_file():
             return
         try:
@@ -102,8 +132,18 @@ class ImageWorker:
         log.info("picture mode: %s", self.describe_plan(self.plan()))
 
     def availability(self) -> tuple[bool, str]:
-        if not settings.images_enabled:
+        mode = settings.image_mode
+        if mode == "off":
             return False, "disabled"
+        if mode not in IMAGE_MODES:
+            return False, "bad_mode"
+        if mode == "huggingface":
+            if settings.hf_token or self.local_fallback_ok():
+                return True, "ready"
+            return False, "hf_no_token"
+        return self.local_availability()
+
+    def local_availability(self) -> tuple[bool, str]:
         if not settings.sd_cli.is_file() or not os.access(settings.sd_cli, os.X_OK):
             return False, "missing_program"
         if not settings.sd_model.is_file():
@@ -123,6 +163,16 @@ class ImageWorker:
         taesd = fast_ok and settings.sd_taesd.is_file() and "--taesd" in self.supported_flags
         return {"lcm": lcm, "taesd": taesd, "steps": settings.sd_lcm_steps if lcm else settings.sd_steps}
 
+    def local_fallback_ok(self) -> bool:
+        return settings.hf_fallback_local and self.local_availability()[0]
+
+    def describe_mode(self) -> str:
+        if settings.image_mode == "huggingface":
+            return f"huggingface ({settings.hf_image_model} via {settings.hf_provider})"
+        if settings.image_mode == "local":
+            return "local, " + self.describe_plan(self.plan())
+        return settings.image_mode
+
     @staticmethod
     def describe_plan(plan: dict) -> str:
         parts = [name for name in ("lcm", "taesd") if plan[name]]
@@ -130,16 +180,32 @@ class ImageWorker:
 
     # ---- queue ----
 
-    def enqueue(self, story: dict, seg: dict) -> bool:
-        """Queue a picture for this page. Returns False when one is already queued, running
-        or finished, which is what prevents duplicate generations."""
+    def enqueue(self, story: dict, seg: dict, retry: bool = False) -> bool:
+        """Start or queue the background for this page. Returns False when one is already queued,
+        running or finished, which is what prevents duplicate generations.
+
+        Cloud backgrounds start at once (even while the page is being written). Local ones only
+        start once the page is ready, so sd-cli never competes with Qwen for the GPU."""
         image = seg["image"]
         if image["status"] in ("queued", "generating", "completed"):
             return False
+        if retry:
+            image.pop("hf_failed", None)  # a retry asks the cloud again first
         ok, reason = self.availability()
         if not ok:
             image.update(status="skipped" if reason == "disabled" else "failed", error=reason, progress=0.0)
             return False
+        if settings.image_mode == "huggingface" and settings.hf_token and not image.get("hf_failed"):
+            image.update(status="generating", progress=0.05, error=None)
+            image["attempts"] = int(image.get("attempts", 0)) + 1
+            key = (story["id"], seg["index"])
+            self._hf_tasks[key] = asyncio.create_task(self._paint_in_cloud(story, seg), name=f"hf-{key}")
+            return True
+        if settings.image_mode == "huggingface" and not self.local_fallback_ok():
+            image.update(status="failed", error=image.get("error") or "failed", progress=0.0)
+            return False
+        if seg["status"] != "ready":
+            return False  # local painting waits for the page; write_segment calls enqueue again
         image.update(status="queued", progress=0.0, error=None)
         image["attempts"] = int(image.get("attempts", 0)) + 1
         self._queue.append((story, seg))
@@ -158,13 +224,88 @@ class ImageWorker:
         if self._current and self._current[0]["id"] == story_id:
             self._cancel_current = True
             await self._kill_process()
+        for key, task in list(self._hf_tasks.items()):
+            if key[0] == story_id:
+                task.cancel()
 
     def queue_length(self) -> int:
-        return len(self._queue) + (1 if self._current else 0)
+        return len(self._queue) + (1 if self._current else 0) + len(self._hf_tasks)
 
     def eta_seconds(self) -> float | None:
+        if settings.image_mode == "huggingface" and settings.hf_token:
+            return timings.average("image", "seconds", ok=True, mode="huggingface")
         mode = self.describe_plan(self.plan())
         return timings.average("image", "seconds", ok=True, mode=mode)
+
+    # ---- cloud ----
+
+    async def _paint_in_cloud(self, story: dict, seg: dict) -> None:
+        image = seg["image"]
+        page = seg["index"] + 1
+        key = (story["id"], seg["index"])
+        prompt = self.build_background_prompt(story, seg)
+        started = time.monotonic()
+        reason = ""
+        try:
+            self._on_change(story)
+            data, kind = await asyncio.wait_for(
+                asyncio.to_thread(
+                    hf_images.generate, prompt, settings.sd_width, settings.sd_height, int(story.get("seed", 42))
+                ),
+                timeout=settings.hf_timeout + 2,  # backstop; generate() keeps its own deadline
+            )
+            seconds = round(time.monotonic() - started, 1)
+            name = f"sf_{story['id']}_{seg['index']}.{kind}"
+            tmp_path = settings.image_dir / f"{name}.part"
+            tmp_path.write_bytes(data)
+            os.replace(tmp_path, settings.image_dir / name)
+            for other in ("png", "jpg"):
+                if other != kind:
+                    (settings.image_dir / f"sf_{story['id']}_{seg['index']}.{other}").unlink(missing_ok=True)
+            image.update(status="completed", progress=1.0, error=None, file=name, seconds=seconds, source="huggingface")
+            log.info(
+                "background painted  story=%s page=%d  %.1fs  huggingface %s  %dx%d\n    prompt: %s",
+                story["id"], page, seconds, settings.hf_image_model, settings.sd_width, settings.sd_height, prompt,
+            )
+            timings.record("image", ok=True, seconds=seconds, mode="huggingface",
+                           size=f"{settings.sd_width}x{settings.sd_height}")
+            return
+        except asyncio.CancelledError:
+            image.update(status="failed", error="cancelled", progress=0.0)
+            raise
+        except asyncio.TimeoutError:
+            reason = "timeout"
+        except hf_images.HFFailed as exc:
+            reason = exc.reason
+            if str(exc) != reason:
+                log.warning("cloud background details  story=%s page=%d  %s", story["id"], page, exc)
+        except OSError as exc:  # e.g. the picture folder could not be written
+            log.error("could not save background story=%s page=%d: %s", story["id"], page, exc)
+            reason = "failed"
+        finally:
+            if self._hf_tasks.get(key) is asyncio.current_task():
+                self._hf_tasks.pop(key, None)
+            self._on_change(story)
+
+        seconds = round(time.monotonic() - started, 1)
+        timings.record("image", ok=False, reason=reason, seconds=seconds, mode="huggingface")
+        if story.get("abandoned"):
+            image.update(status="failed", error="cancelled", progress=0.0)
+            return
+        if self.local_fallback_ok():
+            log.warning(
+                "cloud background failed  story=%s page=%d  reason=%s after %.1fs; painting it locally instead",
+                story["id"], page, reason, seconds,
+            )
+            image["hf_failed"] = True
+            image.update(status="none", progress=0.0, error=reason)
+            if seg["status"] == "ready":
+                self.enqueue(story, seg)  # otherwise write_segment queues it when the page is done
+        else:
+            log.warning("cloud background failed  story=%s page=%d  reason=%s after %.1fs",
+                        story["id"], page, reason, seconds)
+            image.update(status="failed", error=reason, progress=0.0)
+        self._on_change(story)
 
     # ---- worker ----
 
@@ -192,18 +333,17 @@ class ImageWorker:
                 self._process = None
                 self._on_change(story)
 
-    def build_prompt(self, story: dict, seg: dict) -> str:
-        """Art style FIRST, then the scene, then the stored character look.
+    @staticmethod
+    def build_background_prompt(story: dict, seg: dict) -> str:
+        """Art style FIRST, then the place, then the no-characters rule. Never the hero: the
+        child's drawing is layered on top in the browser.
 
         SD 1.5 only reads about 75 tokens (roughly 50 words) and pays most attention to the
-        beginning. The style goes first so it can never be cut off, and the rest is capped."""
-        scene = (seg.get("visual_prompt") or seg["text"].split(".")[0]).strip().rstrip(".")
-        parts = [scene]
-        look = (story.get("character_look") or "").strip().rstrip(".")
-        if look and look.lower() not in scene.lower():
-            parts.append(look)
-        subject = " ".join(", ".join(parts).split()[: settings.sd_prompt_words])
-        return f"{settings.sd_style}, {subject}"
+        beginning. The style goes first so it can never be cut off, and the place is capped."""
+        place = (seg.get("setting") or story.get("world") or story.get("premise") or "a storybook landscape")
+        place = place.strip().rstrip(".")
+        place = " ".join(place.split()[: settings.sd_prompt_words])
+        return f"{settings.sd_style}, {place}, {NO_CHARACTERS}"
 
     def build_command(self, prompt: str, seed: int, out_path: Path, plan: dict | None = None) -> list[str]:
         # A list of arguments (never a shell string), so story text cannot inject commands.
@@ -229,7 +369,7 @@ class ImageWorker:
             # prompt has no effect at guidance 1, so it is left out.
             cmd += ["--lora-model-dir", str(settings.sd_lcm_lora.parent), "--cfg-scale", "1", "--sampling-method", "lcm"]
         elif "--negative-prompt" in self.supported_flags and settings.sd_negative:
-            cmd += ["--negative-prompt", settings.sd_negative]
+            cmd += ["--negative-prompt", f"{settings.sd_negative}, person, people, animal, creature, character"]
         if "--seed" in self.supported_flags:
             cmd += ["--seed", str(seed)]
         cmd += ["-o", str(out_path)]
@@ -250,7 +390,7 @@ class ImageWorker:
 
         final_path = settings.image_dir / f"sf_{story['id']}_{seg['index']}.png"
         tmp_path = settings.image_dir / f"sf_{story['id']}_{seg['index']}.part.png"
-        prompt = self.build_prompt(story, seg)
+        prompt = self.build_background_prompt(story, seg)
         seed = int(story.get("seed", 42))
 
         first = self.plan()
@@ -276,7 +416,8 @@ class ImageWorker:
         seconds = result["seconds"]
         if result["ok"]:
             os.replace(tmp_path, final_path)
-            image.update(status="completed", progress=1.0, error=None, file=final_path.name, seconds=seconds)
+            (settings.image_dir / f"sf_{story['id']}_{seg['index']}.jpg").unlink(missing_ok=True)
+            image.update(status="completed", progress=1.0, error=None, file=final_path.name, seconds=seconds, source="local")
             log.info(
                 "picture painted  story=%s page=%d  %.1fs  mode=%s  %dx%d  free_mem before=%dMB lowest=%dMB%s\n"
                 "    prompt: %s",

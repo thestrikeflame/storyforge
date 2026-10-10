@@ -52,6 +52,10 @@ def build_reply(user_text: str) -> dict:
     reply: dict = {}
     if first:
         reply["title"] = "Mira and the Tenth Mushroom"
+    reply["setting"] = (
+        "a misty enchanted forest of ancient oaks and glowing mushrooms at dawn"
+        if number == 1 else f"a moonlit pond ringed with lily pads at night, scene {number}"
+    )
     reply["segment"] = ENDING if final else PAGES[(number - 1) % len(PAGES)]
     if first:
         reply["character_look"] = "a small purple baby dragon with large amber eyes and tiny wings"
