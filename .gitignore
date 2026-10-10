@@ -1,0 +1,58 @@
+# Secrets: env files, API keys, tokens, HTTPS keys
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.*
+*.token
+credentials*.json
+certs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Model files
+models/
+*.gguf
+*.safetensors
+*.bin
+*.ckpt
+*.onnx
+*.onnx.json
+*.pt
+*.pth
+
+# Generated images and audio
+generated_images/
+sf_*/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.wav
+*.mp3
+*.ogg
+benchmark_results/
+
+# Runtime state and logs
+data/
+logs/
+*.log
+*.pid
+
+# Zip backups
+*.zip
+*.tar.gz
+*.bak

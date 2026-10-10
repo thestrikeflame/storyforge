@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#12102b">
+  <title>StoryForge</title>
+  <link rel="preload" href="/static/fonts/fraunces-latin-soft.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/literata-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="/static/art/icon.svg" type="image/svg+xml">
+</head>
+<body data-view="landing">
+
+<header class="top">
+  <a class="wordmark" href="/" id="wordmark" aria-label="StoryForge, back to the cover">StoryForge</a>
+
+  <div class="top-centre">
+    <div class="top-landing">
+      <button class="journey" id="start" type="button">Start Journey</button>
+      <button class="quiet-link" id="resume" type="button" hidden></button>
+    </div>
+    <div class="top-reading" aria-live="polite">
+      <h1 class="story-title" id="story-title"></h1>
+      <p class="page-count" id="page-count"></p>
+    </div>
+  </div>
+
+  <div class="top-actions">
+    <button class="icon-button" id="narration-toggle" type="button" aria-pressed="true" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path class="spk" d="M4 9.5h3.2L12 5.6v12.8l-4.8-3.9H4z"/><path class="wave" d="M15.2 9.2a4 4 0 0 1 0 5.6M17.6 6.8a7.4 7.4 0 0 1 0 10.4"/><path class="slash" d="M15 9.5l5 5m0-5l-5 5"/></svg>
+      <span id="narration-toggle-label">Narration on</span>
+    </button>
+    <div class="leave" id="leave" hidden>
+      <button class="ghost" id="new-story" type="button">New story</button>
+      <span class="leave-confirm" id="leave-confirm" hidden>
+        Leave this story?
+        <button class="ghost" id="leave-yes" type="button">Yes, start a new one</button>
+        <button class="ghost" id="leave-no" type="button">Keep reading</button>
+      </span>
+    </div>
+  </div>
+</header>
+
+<main class="stage" id="stage">
+
+  <!-- The cover: an open book coming to life. Replace it by adding static/art/landing.jpg -->
+  <div class="cover" id="cover" aria-hidden="true">
+    <img class="cover-photo" id="cover-photo" alt="" hidden>
+    <svg class="cover-art" id="cover-art" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <radialGradient id="g-bloom">
+          <stop offset="0" stop-color="#fff3c9" stop-opacity=".9"/>
+          <stop offset=".22" stop-color="#f4c76b" stop-opacity=".5"/>
+          <stop offset=".55" stop-color="#e89a3c" stop-opacity=".14"/>
+          <stop offset="1" stop-color="#e89a3c" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="g-ray" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stop-color="#fff6d4" stop-opacity=".95"/>
+          <stop offset=".45" stop-color="#f4c76b" stop-opacity=".38"/>
+          <stop offset="1" stop-color="#f4c76b" stop-opacity="0"/>
+        </linearGradient>
+        <linearGradient id="g-page-l" x1="1" y1="0" x2="0" y2="0">
+          <stop offset="0" stop-color="#fffbe9"/><stop offset=".3" stop-color="#f9edd0"/><stop offset="1" stop-color="#cdb98f"/>
+        </linearGradient>
+        <linearGradient id="g-page-r" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#fffbe9"/><stop offset=".3" stop-color="#f9edd0"/><stop offset="1" stop-color="#cdb98f"/>
+        </linearGradient>
+        <linearGradient id="g-leaf" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#fffdf2"/><stop offset="1" stop-color="#f6e2ae"/>
+        </linearGradient>
+        <linearGradient id="g-block" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#bfa873"/><stop offset="1" stop-color="#e2d2aa"/>
+        </linearGradient>
+        <filter id="f-ray" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="6"/></filter>
+        <filter id="f-soft" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>
+        <filter id="f-softer" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="24"/></filter>
+      </defs>
+
+      <ellipse cx="400" cy="490" rx="340" ry="30" fill="#05041a" opacity=".6" filter="url(#f-soft)"/>
+
+      <g class="light">
+        <circle cx="400" cy="290" r="330" fill="url(#g-bloom)"/>
+        <g class="rays" filter="url(#f-ray)">
+          <path d="M392 380 L236 30 L318 8 Z" fill="url(#g-ray)"/>
+          <path d="M399 380 L362 -10 L438 -10 Z" fill="url(#g-ray)"/>
+          <path d="M408 380 L482 8 L564 30 Z" fill="url(#g-ray)"/>
+          <path d="M388 380 L96 104 L160 56 Z" fill="url(#g-ray)" opacity=".75"/>
+          <path d="M412 380 L640 56 L704 104 Z" fill="url(#g-ray)" opacity=".75"/>
+        </g>
+      </g>
+
+      <!-- cover boards -->
+      <path d="M86 440 L400 468 L714 440 L714 456 L400 486 L86 456 Z" fill="#3a2563"/>
+      <path d="M86 440 L400 468 L714 440" fill="none" stroke="#f4c76b" stroke-opacity=".5" stroke-width="1.5"/>
+      <!-- the thickness of the pages under the two open leaves -->
+      <path d="M104 424 C220 390 330 402 400 450 C470 402 580 390 696 424 L696 440 L400 468 L104 440 Z" fill="url(#g-block)"/>
+      <g fill="none" stroke="#9c8656" stroke-opacity=".55" stroke-width="1">
+        <path d="M104 429 C220 396 330 408 400 456 C470 408 580 396 696 429"/>
+        <path d="M104 434 C220 402 330 414 400 462 C470 414 580 402 696 434"/>
+      </g>
+
+      <g class="leaf leaf-left">
+        <path d="M400 450 C330 402 220 390 104 424 L104 194 C220 158 330 170 400 220 Z" fill="url(#g-page-l)"/>
+        <g stroke="#8d7a55" stroke-opacity=".3" stroke-width="3" stroke-linecap="round" fill="none">
+          <path d="M150 236 C230 212 310 218 366 248"/><path d="M150 266 C230 242 310 248 366 278"/>
+          <path d="M150 296 C230 272 310 278 366 308"/><path d="M150 326 C230 302 310 308 340 324"/>
+          <path d="M150 356 C230 332 310 338 366 368"/>
+        </g>
+      </g>
+      <g class="leaf leaf-right">
+        <path d="M400 450 C470 402 580 390 696 424 L696 194 C580 158 470 170 400 220 Z" fill="url(#g-page-r)"/>
+        <g stroke="#8d7a55" stroke-opacity=".3" stroke-width="3" stroke-linecap="round" fill="none">
+          <path d="M434 248 C490 218 570 212 650 236"/><path d="M434 278 C490 248 570 242 650 266"/>
+          <path d="M434 308 C490 278 570 272 650 296"/><path d="M460 324 C490 308 570 302 650 326"/>
+          <path d="M434 368 C490 338 570 332 650 356"/>
+        </g>
+      </g>
+      <!-- a page lifting by itself -->
+      <g class="leaf leaf-turn">
+        <path d="M400 220 C424 176 462 140 512 122 C526 200 524 300 506 388 C462 398 426 420 400 450 Z" fill="url(#g-leaf)"/>
+        <path d="M512 122 C526 200 524 300 506 388" fill="none" stroke="#d9c38d" stroke-width="1.5"/>
+      </g>
+
+      <g class="light light-front">
+        <ellipse cx="400" cy="318" rx="170" ry="130" fill="#fff3c9" opacity=".6" filter="url(#f-softer)"/>
+        <path d="M400 222 L400 448" stroke="#fffdf0" stroke-width="7" stroke-linecap="round" filter="url(#f-ray)"/>
+        <g class="sparks" fill="#fff6d4">
+          <path d="M250 96l4 12 12 4-12 4-4 12-4-12-12-4 12-4z"/>
+          <path d="M566 70l3 9 9 3-9 3-3 9-3-9-9-3 9-3z"/>
+          <path d="M628 176l2.5 7.5 7.5 2.5-7.5 2.5-2.5 7.5-2.5-7.5-7.5-2.5 7.5-2.5z"/>
+          <path d="M168 190l2.5 7.5 7.5 2.5-7.5 2.5-2.5 7.5-2.5-7.5-7.5-2.5 7.5-2.5z"/>
+          <path d="M344 44l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/>
+        </g>
+      </g>
+    </svg>
+    <div class="motes" id="motes"></div>
+  </div>
+
+  <p class="cover-line" id="cover-line">Tell a story idea and watch it become a picture book, one page at a time.</p>
+
+  <!-- Describe your story -->
+  <section class="invite" id="invite" aria-labelledby="invite-heading" hidden>
+    <h2 id="invite-heading">Let's embark on a journey and bring your imagination to life.</h2>
+    <p class="invite-how" id="invite-how">Hold the microphone icon and describe your basic story.</p>
+
+    <div class="mic-wrap">
+      <button class="mic" id="premise-mic" type="button" aria-label="Hold to speak your story idea">
+        <span class="mic-rings" aria-hidden="true"></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M8.5 21h7"/></svg>
+      </button>
+      <div class="bars" id="premise-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <p class="mic-status" id="premise-mic-status" role="status"></p>
+
+    <form class="premise-form" id="premise-form">
+      <label class="visually-hidden" for="premise">Your story idea</label>
+      <textarea id="premise" rows="2" placeholder="Or type it here. For example: a small purple dragon finds a mysterious door in an enchanted forest."></textarea>
+      <div class="form-row">
+        <button class="ghost" id="invite-back" type="button">Back</button>
+        <button class="primary" id="premise-submit" type="submit">Begin the story</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- The open book -->
+  <div class="book-row" id="book-row" hidden>
+  <button class="leaf-button" id="prev-page" type="button" aria-label="Previous page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l-8 8 8 8"/></svg></button>
+  <section class="book" id="book" aria-label="Storybook">
+    <div class="page page-picture">
+      <figure class="picture" id="picture" data-state="waiting">
+        <img id="picture-img" alt="">
+        <div class="painting" id="painting">
+          <div class="wash" aria-hidden="true"><i></i><i></i><i></i></div>
+          <p class="painting-label" id="painting-label">Painting this page</p>
+          <div class="meter" role="progressbar" aria-label="Picture progress" aria-valuemin="0" aria-valuemax="100" id="picture-meter"><span id="picture-meter-fill"></span></div>
+          <p class="painting-eta" id="painting-eta"></p>
+        </div>
+        <div class="unpainted" id="unpainted">
+          <svg viewBox="0 0 120 90" aria-hidden="true"><path d="M60 78C48 66 28 62 10 68V26c18-6 38-2 50 10 12-12 32-16 50-10v42c-18-6-38-2-50 10z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/><path d="M60 36v42" stroke="currentColor" stroke-width="2.5"/><path d="M60 22v-10M44 20l-5-8M76 20l5-8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+          <p id="unpainted-message">This page stayed unpainted.</p>
+          <button class="ink-button" id="picture-retry" type="button">Paint it again</button>
+        </div>
+      </figure>
+    </div>
+
+    <div class="page page-words">
+      <div class="words" id="words" tabindex="-1"></div>
+      <div class="words-problem" id="words-problem" hidden>
+        <p id="words-problem-message"></p>
+        <div class="form-row">
+          <button class="ink-button" id="words-retry" type="button">Try again</button>
+          <button class="ink-link" id="words-change" type="button">Change my idea</button>
+        </div>
+      </div>
+
+      <div class="narration" id="narration" hidden>
+        <button class="round" id="narration-play" type="button" aria-label="Pause narration">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+        </button>
+        <div class="narration-track" role="progressbar" aria-label="Narration progress" aria-valuemin="0" aria-valuemax="100" id="narration-track"><span id="narration-fill"></span></div>
+        <button class="ink-link" id="narration-replay" type="button">Read again</button>
+      </div>
+      <p class="narration-note" id="narration-note" hidden></p>
+
+    </div>
+    <div class="turn" id="turn" aria-hidden="true"></div>
+  </section>
+  <button class="leaf-button" id="next-page" type="button" aria-label="Next page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4l8 8-8 8"/></svg></button>
+  </div>
+
+  <!-- What happens next -->
+  <section class="next" id="next" aria-labelledby="next-heading" hidden>
+    <div class="next-wait" id="next-wait" hidden>
+      <p id="next-wait-text"></p>
+      <button class="quiet-link" id="choose-now" type="button" hidden>Choose now</button>
+    </div>
+
+    <div class="next-choices" id="next-choices" hidden>
+      <h2 id="next-heading">What happens next?</h2>
+      <div class="choices" id="choices"></div>
+      <form class="own-idea" id="own-idea-form">
+        <button class="mic small" id="idea-mic" type="button" aria-label="Hold to speak your own idea">
+          <span class="mic-rings" aria-hidden="true"></span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M8.5 21h7"/></svg>
+        </button>
+        <label class="visually-hidden" for="own-idea">Your own idea for what happens next</label>
+        <input id="own-idea" type="text" autocomplete="off" placeholder="Or describe your own idea">
+        <button class="primary small" id="own-idea-submit" type="submit">Make it happen</button>
+      </form>
+      <p class="mic-status" id="idea-mic-status" role="status"></p>
+      <div class="next-quiet">
+        <button class="quiet-link" id="just-continue" type="button">Continue the adventure</button>
+        <button class="quiet-link" id="finish-story" type="button">Finish the story</button>
+      </div>
+    </div>
+
+    <div class="the-end" id="the-end" hidden>
+      <h2>The end</h2>
+      <div class="form-row">
+        <button class="primary" id="end-new" type="button">Start a new journey</button>
+        <button class="quiet-link" id="end-reread" type="button">Read it again from page 1</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="alert" hidden></div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

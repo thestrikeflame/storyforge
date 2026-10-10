@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""A stand-in for sd-cli. It prints progress like the real program and writes a PNG.
+
+Environment switches:  FAKE_SD_STEP_SECONDS (default 0.15), FAKE_SD_FAIL=1 (exit with an
+error), FAKE_SD_FAIL_FILE (fail while that file exists), FAKE_SD_LOG (append each call).
+"""
+import os
+import sys
+import time
+
+HELP = """usage: sd-cli [arguments]
+  -m, --model <string>            path to model
+  -p, --prompt <string>           the prompt to render
+  -n, --negative-prompt <string>  the negative prompt
+  -W, --width <int>               image width
+  -H, --height <int>              image height
+  --steps <int>                   number of sample steps
+  -s, --seed <int>                RNG seed
+  --sampling-method <string>      sampling method
+  --cfg-scale <float>             guidance scale
+  --diffusion-fa                  use flash attention in the diffusion model
+  --vae-tiling                    process vae in tiles
+  --backend <string>              per-module backend
+  --max-vram <float>              vram budget
+  --taesd <string>                path to taesd
+  --lora-model-dir <string>       lora model directory
+  -o, --output <string>           path to write result image
+"""
+
+args = sys.argv[1:]
+if "--help" in args or "-h" in args:
+    print(HELP)
+    sys.exit(0)
+
+
+def value(*names, default=None):
+    for name in names:
+        if name in args:
+            return args[args.index(name) + 1]
+    return default
+
+
+out = value("-o", "--output")
+steps = int(value("--steps", default="20"))
+prompt = value("-p", "--prompt", default="")
+width, height = int(value("-W", default="512")), int(value("-H", default="512"))
+if os.environ.get("FAKE_SD_LOG"):
+    with open(os.environ["FAKE_SD_LOG"], "a") as handle:
+        handle.write(" ".join(args) + "\n")
+
+fast_fail = os.environ.get("FAKE_SD_FAIL_FAST_FILE")
+if fast_fail and os.path.exists(fast_fail) and "--taesd" in args:
+    print("[ERROR] taesd: unsupported tensor")
+    sys.exit(1)
+fail_file = os.environ.get("FAKE_SD_FAIL_FILE")
+if os.environ.get("FAKE_SD_FAIL") == "1" or (fail_file and os.path.exists(fail_file)):
+    print("[ERROR] ggml_extend.hpp: CUDA error: out of memory")
+    sys.exit(1)
+
+print("[INFO ] loading model")
+delay = float(os.environ.get("FAKE_SD_STEP_SECONDS", "0.15"))
+for step in range(1, steps + 1):
+    time.sleep(delay)
+    bar = "=" * int(50 * step / steps)
+    sys.stdout.write(f"\r  |{bar:<50}| {step}/{steps} - {delay:.2f}s/it")
+    sys.stdout.flush()
+print(f"\n[INFO ] sampling completed, taking {delay * steps:.2f}s")
+print("[INFO ] decoding 1 latents")
+for tile in range(1, 5):
+    sys.stdout.write(f"\r  |{'=' * tile * 12:<50}| {tile}/4 - 0.10s/it")
+    sys.stdout.flush()
+    time.sleep(delay / 2)
+
+from PIL import Image, ImageDraw  # test-only dependency
+import hashlib
+
+seed = int(hashlib.sha1(prompt.encode()).hexdigest()[:6], 16)
+top = (40 + seed % 60, 30 + (seed >> 4) % 50, 110 + (seed >> 8) % 80)
+bottom = (230, 170 + seed % 60, 90 + (seed >> 6) % 60)
+img = Image.new("RGB", (width, height))
+draw = ImageDraw.Draw(img)
+for y in range(height):
+    t = y / height
+    draw.line([(0, y), (width, y)], fill=tuple(int(top[i] * (1 - t) + bottom[i] * t) for i in range(3)))
+draw.ellipse([width * 0.3, height * 0.35, width * 0.7, height * 0.75], fill=(120, 70, 170))
+draw.ellipse([width * 0.42, height * 0.45, width * 0.48, height * 0.52], fill=(255, 235, 150))
+draw.ellipse([width * 0.54, height * 0.45, width * 0.60, height * 0.52], fill=(255, 235, 150))
+draw.text((16, height - 28), "test picture: " + prompt[:60], fill=(255, 255, 255))
+img.save(out)
+print(f"\n[INFO ] save result image to '{out}'")
