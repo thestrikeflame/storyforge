@@ -165,7 +165,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                         continue
                 _update_partial(story, seg, stream, started)
                 try:
-                    page = llm.parse_page(raw, first, final)
+                    page = llm.parse_page(raw, first, final, last_try=attempt == 2)
                     break
                 except llm.WriterFailed as exc:
                     if seg["text_complete"]:
@@ -294,6 +294,7 @@ class DrawnHero(BaseModel):
     hero_png: str = Field(min_length=100, max_length=6_000_000)
     preview_jpeg: str = Field(min_length=100, max_length=2_000_000)
     idea: str = Field(default="", max_length=settings.max_premise_chars)
+    who: str = Field(default="", max_length=120)  # "Who is this?" on /draw, e.g. "my bunny Ricky"
 
 
 def _decode_image(value: str, magic: bytes, limit: int) -> bytes:
@@ -366,6 +367,9 @@ async def create_drawn_story(body: DrawnHero):
     if not (8 <= width <= 2048 and 8 <= height <= 2048):
         raise HTTPException(422, "The drawing could not be read. Try pressing Done again.")
     idea = llm.clean_text(body.idea, settings.max_premise_chars)
+    # The child's own words, kept as typed: only whitespace collapsed, double quotes made single
+    # (it is quoted in prompts), control characters dropped and the length capped.
+    who = " ".join("".join(c for c in body.who.replace('"', "'") if c.isprintable()).split())[:80]
 
     story = new_story(idea or "A story about the hero I drew")
     path = hero_path(story["id"])
@@ -377,16 +381,19 @@ async def create_drawn_story(body: DrawnHero):
 
     started = time.monotonic()
     try:
-        description, model = await asyncio.to_thread(vision.describe_hero, preview)
-        log.info("hero described  story=%s  %.1fs  %s: %s", story["id"], time.monotonic() - started, model, description)
+        description, model = await asyncio.to_thread(vision.describe_hero, preview, who)
+        log.info("hero described  story=%s  %.1fs  %s  who=%r: %s",
+                 story["id"], time.monotonic() - started, model, who, description)
     except vision.VisionFailed as exc:
         description = vision.FALLBACK
         log.warning("hero could not be described (%s); using a general description", exc)
     story["hero_description"] = description
     story["character_look"] = description
+    if who:
+        story["hero_who"] = who  # the child's own words win over the model's guess
     if not idea:
         # Only the kind of character: the full description in the premise gets copied into page 1.
-        story["premise"] = f"A story starring {llm.hero_notes(description)[0]}"
+        story["premise"] = f"A story starring {who or llm.hero_notes(description)[0]}"
 
     seg = new_segment(0, None, "opening")
     story["segments"].append(seg)

@@ -164,6 +164,13 @@ class Parsing(unittest.TestCase):
             parse_page("no json here", True, False)
         with self.assertRaises(WriterFailed):
             parse_page('{"segment": "Too short."}', True, False)
+        thirty = json.dumps({"segment": " ".join(["word"] * 30) + "."})
+        with self.assertRaises(WriterFailed):
+            parse_page(thirty, True, False)  # first try: ask again for a fuller page
+        self.assertEqual(len(parse_page(thirty, True, False, last_try=True).segment.split()), 30)  # last try: keep it
+        from storyforge.vision import clean_description
+        self.assertEqual(clean_description("A smiling man wearing a hat, drawn in dark blue, with a big nose."),
+                         "a smiling man wearing a hat, with a big nose")
 
     def test_validation_repairs_choices(self):
         from storyforge.llm import parse_page
@@ -244,6 +251,13 @@ class Parsing(unittest.TestCase):
         self.assertEqual(hero_notes("a small blue fish with a yellow crown, one black eye, and a red triangular tail"),
                          ("a small blue fish", ["a yellow crown", "one black eye", "a red triangular tail"]))
         self.assertEqual(hero_notes("a brave little hero in bright colours"), ("a brave little hero in bright colours", []))
+        # real descriptions: a kind, then 2-3 features, never a lone word
+        self.assertEqual(hero_notes("a smiling person wearing a hat and glasses, with a vest, has a rounded face, a small nose"),
+                         ("a smiling person", ["wearing a hat and glasses", "a vest", "a rounded face"]))
+        self.assertEqual(hero_notes("a round, yellow creature with a cream belly, pink cheeks, and dark eyes"),
+                         ("a round, yellow creature", ["a cream belly", "pink cheeks", "dark eyes"]))
+        self.assertEqual(hero_notes("a rabbit-like creature with a dark purple body, featuring two long ears, and a nose"),
+                         ("a rabbit-like creature", ["a dark purple body", "two long ears", "a nose"]))
         drawn = list(response_schema(True, False, drawn_hero=True)["properties"])
         self.assertLess(drawn.index("hero_name"), drawn.index("segment"))
         self.assertNotIn("hero_name", response_schema(True, False)["properties"])
@@ -705,6 +719,34 @@ class DrawnHero(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(story["hero_description"], "a brave little hero in bright colours")
         self.assertEqual(wait_ready(story["id"], 0, CLOUD)["status"], "ready")
+
+    def test_5_who_is_this_beats_the_guess_and_everything_is_logged(self):
+        payload = dict(drawing_payload()[0], who='my bunny "Ricky"')
+        status, story = call("POST", f"{CLOUD}/api/stories/drawn", payload)
+        self.assertEqual(status, 201, story)
+        # the vision model is told what the child said ...
+        self.assertIn("The child says this is: \"my bunny 'Ricky'\"", call("GET", f"{HF}/state")[1]["vision_prompt"])
+        # ... and so is the storyteller, ahead of the model's notes
+        self.assertEqual(story["premise"], "A story starring my bunny 'Ricky'")
+        wait_ready(story["id"], 0, CLOUD)
+        first = call("GET", f"{LLM}/state")[1]["last_user"]
+        self.assertLess(first.index("The reader says their hero is \"my bunny 'Ricky'\". That comes first"),
+                        first.index("The hero is a character the reader drew"))
+        saved = json.loads((TMP / "cloud_data" / "sessions" / f"{story['id']}.json").read_text())
+        self.assertEqual(saved["hero_who"], "my bunny 'Ricky'")
+        call("POST", f"{CLOUD}/api/stories/{story['id']}/continue", {"kind": "continue", "after": 0})
+        wait_ready(story["id"], 1, CLOUD)
+        self.assertIn("The reader calls the hero: \"my bunny 'Ricky'\"", call("GET", f"{LLM}/state")[1]["last_user"])
+        # each drawing's vision request is traceable: image size, exact prompt, model, raw answer
+        log_text = (TMP / "cloud_logs" / "storyforge.log").read_text()
+        self.assertIn("hero vision request  image=?", log_text)  # the test JPEG is not a real one
+        self.assertIn("The child says this is", log_text)
+        self.assertIn("hero vision answer  model=meta-llama/Llama-4-Scout-17B-16E-Instruct  raw='A round orange cat", log_text)
+        # without a "who", nothing about it reaches either prompt
+        status, story = call("POST", f"{CLOUD}/api/stories/drawn", drawing_payload()[0])
+        self.assertNotIn("The child says", call("GET", f"{HF}/state")[1]["vision_prompt"])
+        self.assertNotIn("hero_who", story)
+        self.assertIn('id="who"', call("GET", f"{CLOUD}/draw")[1].decode())
 
     def test_4_bad_drawings_are_rejected(self):
         payload = drawing_payload()[0]

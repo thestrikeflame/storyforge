@@ -88,6 +88,7 @@ class Handler(BaseHTTPRequestHandler):
     def vision(self, body: dict):
         model = body.get("model", "")
         STATE["vision_models"].append(model)
+        STATE["vision_prompt"] = next((p["text"] for p in body["messages"][0]["content"] if p.get("type") == "text"), "")
         parts = body["messages"][0]["content"]
         STATE["vision_had_image"] = any(
             p.get("type") == "image_url" and p["image_url"]["url"].startswith("data:image/jpeg;base64,/9j/")

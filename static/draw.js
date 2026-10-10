@@ -155,7 +155,8 @@
   }
   $("undo").addEventListener("click", undo);
   document.addEventListener("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !state.sending) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !state.sending
+        && !event.target.matches("input, textarea")) { // in the "Who is this?" box, Ctrl+Z undoes typing
       event.preventDefault();
       undo();
     }
@@ -174,17 +175,36 @@
 
   /* ───────── Done: hero PNG + description + first page ───────── */
 
-  function bounds() {
+  function box(strokes) {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const s of state.strokes) {
+    for (const s of strokes) {
       const r = s.width / 2;
       for (const [x, y] of s.points) {
         x0 = Math.min(x0, x - r); y0 = Math.min(y0, y - r);
         x1 = Math.max(x1, x + r); y1 = Math.max(y1, y + r);
       }
     }
-    const pad = Math.max(x1 - x0, y1 - y0) * 0.04 + 2;
-    return { x: x0 - pad, y: y0 - pad, w: x1 - x0 + 2 * pad, h: y1 - y0 + 2 * pad };
+    return { x0, y0, x1, y1 };
+  }
+
+  // The drawing's edges, ignoring stray dots and tiny marks far away from it: one accidental tap
+  // in a corner would otherwise shrink the hero (and what the vision model sees) to a speck.
+  function bounds() {
+    const small = Math.min(state.size.w, state.size.h) * 0.05;
+    const tiny = (s) => { const b = box([s]); return Math.max(b.x1 - b.x0, b.y1 - b.y0) < small; };
+    const main = state.strokes.filter((s) => !tiny(s));
+    let b = box(main.length ? main : state.strokes);
+    if (main.length) {
+      const reach = Math.max(b.x1 - b.x0, b.y1 - b.y0) * 0.25; // eyes, buttons and spots nearby still count
+      const near = state.strokes.filter((s) => {
+        if (!tiny(s)) return true;
+        const t = box([s]);
+        return t.x1 > b.x0 - reach && t.x0 < b.x1 + reach && t.y1 > b.y0 - reach && t.y0 < b.y1 + reach;
+      });
+      b = box(near);
+    }
+    const pad = Math.max(b.x1 - b.x0, b.y1 - b.y0) * 0.04 + 2;
+    return { x: b.x0 - pad, y: b.y0 - pad, w: b.x1 - b.x0 + 2 * pad, h: b.y1 - b.y0 + 2 * pad };
   }
 
   // The drawing cropped to its edges, at most `max` pixels on its longer side.
@@ -224,6 +244,7 @@
         hero_png: render(768).toDataURL("image/png"),
         preview_jpeg: render(512, "#ffffff").toDataURL("image/jpeg", 0.85),
         idea: new URLSearchParams(location.search).get("idea") || "",
+        who: $("who").value.trim(),
       };
       const response = await fetch("/api/stories/drawn", {
         method: "POST",
@@ -251,6 +272,32 @@
       clearTimeout(slow);
       clearTimeout(timer);
     }
+  }
+
+  /* ───────── "Who is this?" ───────── */
+
+  $("who-form").addEventListener("submit", (event) => { event.preventDefault(); $("who").blur(); });
+  // Saying it: the browser's own speech recognition, where there is one (Chrome, Edge, Safari;
+  // it needs https or localhost). Typing always works, and phone keyboards have a mic too.
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (Recognition && window.isSecureContext) {
+    const mic = $("who-mic");
+    let listening = null;
+    mic.hidden = false;
+    mic.addEventListener("click", () => {
+      if (listening) { listening.stop(); return; }
+      const rec = new Recognition();
+      rec.lang = document.documentElement.lang || "en";
+      rec.interimResults = true;
+      rec.maxAlternatives = 1;
+      rec.onresult = (event) => {
+        $("who").value = Array.from(event.results).map((r) => r[0].transcript).join("").slice(0, 60);
+      };
+      rec.onend = rec.onerror = () => { listening = null; mic.classList.remove("listening"); };
+      listening = rec;
+      mic.classList.add("listening");
+      try { rec.start(); } catch (_) { rec.onend(); }
+    });
   }
 
   $("done").addEventListener("click", done);

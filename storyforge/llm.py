@@ -92,10 +92,25 @@ def hero_notes(description: str) -> tuple[str, list[str]]:
     """Split the vision description into the kind of character and a few short features, so the
     storyteller gets notes to use rather than a sentence to copy.
     "a small blue fish with a yellow crown, one black eye, and a red tail"
-      -> ("a small blue fish", ["a yellow crown", "one black eye", "a red tail"])"""
-    kind, _, rest = description.partition(" with ")
-    features = [f.strip(" .") for f in re.split(r",\s*(?:and\s+)?|\s+and\s+", rest) if f.strip(" .")]
-    return kind.strip(" ,.") or description, features[:4]
+      -> ("a small blue fish", ["a yellow crown", "one black eye", "a red tail"])
+    The kind ends at the first "with", "wearing", "holding", "has" and so on; the features are
+    the pieces after it, split at commas and at "and a/an/two..." ("yellow and blue" stays together), with leading
+    words like "featuring" or "has" dropped. At most three features."""
+    text = description.strip().rstrip(".")
+    # A keyword ends the kind; a comma only when there is none ("a round, yellow creature with ..."
+    # keeps its adjectives together).
+    split = re.search(r"\s(?:with|wearing|holding|having|has|featuring|that|who)\s", text) or re.search(",", text)
+    if not split:
+        return text, []
+    kind, rest = text[:split.start()], text[split.start():]
+    features = []
+    # Split at commas, and at "and" before a new item ("... hat and a long tail"), but not inside
+    # one ("a yellow and blue patch").
+    for piece in re.split(r",\s*(?:and\s+)?|\s+and\s+(?=(?:a|an|the|one|two|three|four|some|its)\s)", rest):
+        piece = re.sub(r"^\s*(?:and|with|featuring|having|has|that has|who has)\s+", "", piece.strip(" ,."), flags=re.I)
+        if len(piece) > 2:
+            features.append(piece)
+    return kind.strip(" ,.") or text, features[:3]
 
 
 def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
@@ -109,17 +124,20 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
 
     if not ready:
         hero = story.get("hero_description")
+        who = story.get("hero_who")
         hero_line = ""
         if hero:
             kind, features = hero_notes(hero)
             hero_line = (
-                f"The hero is a character the reader drew: {kind}."
+                (f'The reader says their hero is "{who}". That comes first: use the name and the kind of '
+                 "character they gave, even where the notes below differ.\n" if who else "")
+                + f"The hero is a character the reader drew: {kind}."
                 + (f" Notes: {'; '.join(features)}." if features else "")
                 + " Make it the main character. Choose its name in \"hero_name\" and begin the page with "
                 "that name. Tell what the hero does, in fresh story words; never list its looks in one "
                 "long sentence. Mention one of the notes naturally, later in the page. The hero only holds "
                 "or uses things that are in these notes.\n"
-                + weapon_rule(hero) + "\n"
+                + weapon_rule(f"{hero} {who or ''}") + "\n"
             )
         user = (
             f"The reader's idea for the story:\n\"{story['premise']}\"\n\n"
@@ -156,9 +174,11 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             f"Story title: {story.get('title') or 'Untitled'}\n"
             f"The reader's original idea: \"{story['premise']}\"\n"
             + (f"Main character's name: {story['hero_name']}\n" if story.get("hero_name") else "")
+            + (f'The reader calls the hero: "{story["hero_who"]}"\n' if story.get("hero_who") else "")
             + f"Main character looks like: {story.get('character_look') or 'not described yet'}\n"
             + ("The hero only holds or uses things from how it looks, or things it finds in the story.\n"
-               + weapon_rule(story["hero_description"]) if story.get("hero_description") else "")
+               + weapon_rule(f"{story['hero_description']} {story.get('hero_who') or ''}")
+               if story.get("hero_description") else "")
             +
             f"Setting: {story.get('world') or 'not described yet'}\n"
             f"Previous page's place: {ready[-1].get('setting') or 'not described'} "
@@ -504,9 +524,10 @@ def word_count(text: str) -> int:
     return len(text.split())
 
 
-def minimum_words() -> int:
-    """Shortest page we accept. Lenient on purpose: a slightly short page beats a retry."""
-    return max(25, settings.segment_min_words // 2)
+def minimum_words(last_try: bool = False) -> int:
+    """Shortest page we accept. Lenient on purpose: a slightly short page beats a retry, and on the
+    last try a short page beats a failed one."""
+    return 25 if last_try else max(25, settings.segment_min_words // 2)
 
 
 @dataclass
@@ -526,7 +547,7 @@ class Page:
     repaired: bool = False
 
 
-def parse_page(raw: str, first: bool, final: bool) -> Page:
+def parse_page(raw: str, first: bool, final: bool, last_try: bool = False) -> Page:
     """Validate the model's reply. Raises WriterFailed when no usable page text exists."""
     data = _loads_lenient(raw)
     repaired = data is None
@@ -548,7 +569,7 @@ def parse_page(raw: str, first: bool, final: bool) -> Page:
     if not isinstance(segment, str):
         segment = ""
     segment = clean_text(segment, 1800)
-    if word_count(segment) < minimum_words():
+    if word_count(segment) < minimum_words(last_try):
         raise WriterFailed(f"page text too short ({word_count(segment)} words)")
     if segment.lstrip().startswith(("{", "[")) or '"visual_prompt"' in segment:
         raise WriterFailed("page text contains JSON")
