@@ -33,16 +33,30 @@ SYSTEM_PROMPT = (
     "You are StoryForge, a storyteller who writes an illustrated story one page at a time "
     "together with a reader. Unless the reader's idea clearly asks for an older audience, "
     "write for children aged 5 to 10: warm, vivid, simple sentences, never frightening or violent. "
+    "Keep it gentle: nobody is hurt, attacked or fought. If the hero has something like a knife, sword "
+    "or other weapon, it is a tool or a toy: for cooking, carving, building or a pretend quest, never for "
+    "fighting. "
     "Each page has at least {min_words} and at most {max_words} words, in two or three short "
     "paragraphs, told in the past tense. Keep names, looks and places consistent with what came before. "
     "Never wrap up the whole story unless you are told it is the last page. "
     "Reply with one JSON object only, no other text."
 )
 
-# Asked for first, so the background can be painted while the rest of the page is written.
-_SETTING_KEY = (
-    '"setting": where THIS page happens, for the background painter: the place, time of day and '
-    "weather in at most 20 words. Only the place: no people, animals or characters.\n"
+# What the hero does on a page. PROVISIONAL: to be replaced by the fixed list for hero animation.
+HERO_ACTIONS = ("standing", "walking", "running", "jumping", "waving", "sitting", "flying", "swimming",
+                "sleeping", "cheering")
+
+# The page plan is asked for first, so the background is painted while the page is written.
+_PLAN_KEYS = (
+    '"setting": a plan for THIS page: the specific place it happens, chosen to fit the story, in at most '
+    "15 words, for the background painter. Any kind of place: a kitchen, a castle hall, a sunny beach, "
+    "a space station, a busy village square, an underwater reef, a snowy mountain, a city park. Do not "
+    "default to a forest; use one only when the story truly happens in one. No people, animals or "
+    "characters.\n"
+    '"visual_details": a list of 2 or 3 concrete things visible in that place, each at most 6 words: '
+    "objects, weather or time of day. Never characters. The page must happen in this place and "
+    "mention every one of these details.\n"
+    f'"action": what the hero is doing on this page, exactly one of: {", ".join(HERO_ACTIONS)}.\n'
 )
 _COMMON_KEYS = (
     '"visual_prompt": at most 20 words for the illustrator: ONE main character (say what it looks '
@@ -71,7 +85,8 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
         hero = story.get("hero_description")
         hero_line = (
             f"The hero is a character the reader drew: {hero}. Make this character the main character, "
-            "keep exactly this look, and give it a fitting name.\n\n" if hero else ""
+            "keep exactly this look, and give it a fitting name. Introduce it by that name in your own "
+            "words; do not copy this description word for word.\n\n" if hero else ""
         )
         user = (
             f"The reader's idea for the story:\n\"{story['premise']}\"\n\n"
@@ -80,8 +95,8 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             "of curiosity so the reader wants to decide what happens next. Do not resolve anything.\n\n"
             "Use these JSON keys in this order:\n"
             '"title": a title for the story, at most 6 words.\n'
-            + _SETTING_KEY +
-            '"segment": the text of page 1.\n'
+            + _PLAN_KEYS +
+            '"segment": the text of page 1, written from the plan above.\n'
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
             '"world": the setting in at most 20 words.\n'
@@ -108,13 +123,15 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             f"The reader's original idea: \"{story['premise']}\"\n"
             f"Main character looks like: {story.get('character_look') or 'not described yet'}\n"
             f"Setting: {story.get('world') or 'not described yet'}\n"
+            f"Previous page's place: {ready[-1].get('setting') or 'not described'} "
+            "(stay there or move somewhere new, as the story needs)\n"
             f"Story so far: {story.get('summary') or 'see the previous page'}\n\n"
             f"Previous page:\n{previous}\n\n"
             f"The reader decided: \"{decision}\"\n\n"
             f"{task}\n\n"
             "Use these JSON keys in this order:\n"
-            + _SETTING_KEY +
-            f'"segment": the text of page {page_number}.\n'
+            + _PLAN_KEYS +
+            f'"segment": the text of page {page_number}, written from the plan above.\n'
             + _COMMON_KEYS + choices_key + _SUMMARY_KEY
         )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -126,6 +143,8 @@ def response_schema(first: bool, final: bool) -> dict:
     if first:
         props["title"] = {"type": "string"}
     props["setting"] = {"type": "string"}
+    props["visual_details"] = {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 3}
+    props["action"] = {"type": "string", "enum": list(HERO_ACTIONS)}
     props["segment"] = {"type": "string"}
     if first:
         props["character_look"] = {"type": "string"}
@@ -364,6 +383,46 @@ def extract_string_field(raw: str, key: str) -> tuple[str | None, bool]:
     return _decode_json_string("".join(out)), False
 
 
+def _string_list(raw: str, key: str) -> list[str] | None:
+    """A finished list of strings ("key": ["a", "b"]) from JSON that may still be arriving."""
+    block = re.search(r'"' + re.escape(key) + r'"\s*:\s*\[(.*?)\]', raw, re.S)
+    if not block:
+        return None
+    return [_decode_json_string(m) for m in re.findall(r'"((?:[^"\\]|\\.)*)"', block.group(1))]
+
+
+def clean_details(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            item = clean_line(item, 60).rstrip(".")
+            if len(item) >= 3 and item.lower() not in (x.lower() for x in out):
+                out.append(item)
+    return out[:3]
+
+
+def clean_action(value) -> str:
+    value = value.strip().lower() if isinstance(value, str) else ""
+    return value if value in HERO_ACTIONS else HERO_ACTIONS[0]
+
+
+def extract_plan(raw: str) -> dict | None:
+    """The page plan, once all of it has streamed in (it comes before the page text):
+    {"setting", "visual_details", "action"}. None until then."""
+    setting, setting_done = extract_string_field(raw, "setting")
+    details = _string_list(raw, "visual_details")
+    action, action_done = extract_string_field(raw, "action")
+    if not (setting_done and setting and details is not None and action_done):
+        return None
+    return {
+        "setting": clean_line(setting, 180),
+        "visual_details": clean_details(details),
+        "action": clean_action(action),
+    }
+
+
 def _decode_json_string(body: str) -> str:
     try:
         return json.loads('"' + body.replace("\n", "\\n").replace("\t", " ") + '"')
@@ -420,6 +479,8 @@ class Page:
     character_look: str = ""
     world: str = ""
     setting: str = ""
+    visual_details: list[str] = field(default_factory=list)
+    hero_action: str = HERO_ACTIONS[0]
     used_fallback_choices: bool = False
     repaired: bool = False
 
@@ -431,10 +492,13 @@ def parse_page(raw: str, first: bool, final: bool) -> Page:
     if data is None:
         # Salvage field by field from broken JSON.
         data = {}
-        for key in ("title", "setting", "segment", "character_look", "world", "visual_prompt", "continuity_summary"):
+        for key in ("title", "setting", "action", "segment", "character_look", "world", "visual_prompt", "continuity_summary"):
             value, _complete = extract_string_field(raw, key)
             if value:
                 data[key] = value
+        details = _string_list(raw, "visual_details")
+        if details:
+            data["visual_details"] = details
         block = re.search(r'"choices"\s*:\s*\[(.*?)(\]|$)', raw, re.S)
         if block:
             data["choices"] = re.findall(r'"((?:[^"\\]|\\.)*)"', block.group(1))
@@ -488,6 +552,8 @@ def parse_page(raw: str, first: bool, final: bool) -> Page:
         character_look=line("character_look", 180) if first else "",
         world=line("world", 180) if first else "",
         setting=line("setting", 180),
+        visual_details=clean_details(data.get("visual_details")),
+        hero_action=clean_action(data.get("action")),
         used_fallback_choices=used_fallback,
         repaired=repaired,
     )

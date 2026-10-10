@@ -9,8 +9,9 @@ IMAGE_MODE=huggingface (default):
   * A request is given up after HF_TIMEOUT_SECONDS. On any failure the page falls back to the
     local queue below (HF_FALLBACK_LOCAL=1), but only once Qwen has finished the page.
 
-When neither the cloud nor the Jetson can paint a page, it gets one of the preset forest
-backgrounds in static/art/fallback-forest-*.jpg instead of no picture (except IMAGE_MODE=off).
+When neither the cloud nor the Jetson can paint a page, it gets one of the preset backgrounds
+in static/art/preset-*.jpg (the one whose place best matches the page's setting) instead of no
+picture (except IMAGE_MODE=off).
 
 IMAGE_MODE=local, and the fallback, use the queue in front of sd-cli:
 
@@ -50,9 +51,64 @@ IMAGE_MODES = ("huggingface", "local", "off")
 NO_CHARACTERS = "scenery only, empty landscape, no people, no animals, no characters"
 
 
+# Ready-made backgrounds (static/art/preset-<place>.jpg) and the words that point to each.
+PRESET_WORDS = {
+    "castle": ("castle", "palace", "tower", "throne", "king", "queen", "knight", "dungeon", "hall"),
+    "beach": ("beach", "sea", "shore", "sand", "coast", "island", "lagoon", "harbour", "harbor", "wave"),
+    "village": ("village", "town", "street", "market", "square", "house", "home", "kitchen", "garden",
+                "farm", "cottage", "bakery", "shop", "school", "park", "city"),
+    "space": ("space", "star", "planet", "moon", "rocket", "galaxy", "comet", "orbit", "astronaut"),
+    "underwater": ("underwater", "reef", "ocean floor", "seabed", "coral", "deep sea", "under the sea",
+                   "submarine", "kelp"),
+}
+
+
+# The plan should never name characters, but a small model sometimes does ("Robot's kitchen",
+# visual detail "robot"). These words are taken out of background prompts so none get painted.
+CHARACTER_WORDS = frozenset("""
+    person people man men woman women boy boys girl girls kid kids child children baby friend friends
+    hero heroine family mom mum dad grandma grandpa granny teacher pirate pirates knight knights king
+    queen prince princess wizard witch fairy fairies elf giant giants monster monsters alien aliens
+    ghost robot robots dragon dragons unicorn unicorns cat cats kitten dog dogs puppy bear bears bunny
+    rabbit rabbits fox foxes mouse mice owl owls bird birds fish lion lions tiger tigers hedgehog
+    penguin penguins frog frogs duck ducks horse horses pony cow pig sheep monkey elephant squirrel
+    turtle dolphin whale shark octopus crab seagull bee butterfly snail he she they his her their
+    figure figures creature creatures character characters animal animals stickman
+""".split())
+
+
+def names_a_character(detail: str) -> bool:
+    """A plan detail that is about a character: a character word, or a name ("Pogo, the ...",
+    "a hat for Mia"): a capitalised word after the first, or a first word followed by a comma."""
+    words = detail.split()
+    if without_characters(detail) != detail.strip():
+        return True
+    if words and words[0].endswith(",") and words[0][:1].isupper():
+        return True
+    return any(w[:1].isupper() for w in words[1:])
+
+
+def without_characters(text: str) -> str:
+    """Drop character words (and their possessives) from a piece of the background prompt."""
+    kept = [w for w in text.split() if re.sub(r"(?:'s|s')$", "", w.strip(",.;:!?").lower()) not in CHARACTER_WORDS]
+    return " ".join(kept).strip(" ,")
+
+
 def preset_backgrounds() -> list[Path]:
-    """The ready-made forest backgrounds used when no picture can be painted."""
-    return sorted((settings.static_dir / "art").glob("fallback-forest-*.jpg"))
+    """The ready-made backgrounds used when no picture can be painted."""
+    return sorted((settings.static_dir / "art").glob("preset-*.jpg"))
+
+
+def pick_preset(presets: list[Path], place: str, fallback_index: int) -> Path:
+    """The preset whose place best matches the page's setting; otherwise a steady choice per page."""
+    text = f" {place.lower()} "
+    best, score = None, 0
+    for path in presets:
+        words = PRESET_WORDS.get(path.stem.removeprefix("preset-"), ())
+        hits = sum(1 for w in words if w in text)
+        if hits > score:
+            best, score = path, hits
+    return best or presets[fallback_index % len(presets)]
 
 _PROGRESS = re.compile(rb"(\d+)/(\d+)\s*-\s*[\d.]+\s*(?:s/it|it/s)")
 # Lines in sd-cli's output that say how long each stage took; copied into the log.
@@ -328,8 +384,11 @@ class ImageWorker:
         if not presets:
             image.update(status="failed", error=reason, progress=0.0)
             return
-        name = presets[(int(story.get("seed", 0)) + seg["index"]) % len(presets)].name
-        image.update(status="completed", progress=1.0, error=None, file=name, source="preset", preset_reason=reason)
+        place = " ".join([seg.get("setting") or "", *(seg.get("visual_details") or []), story.get("world") or ""])
+        chosen = pick_preset(presets, place, int(story.get("seed", 0)) + seg["index"])
+        name = chosen.name
+        image.update(status="completed", progress=1.0, error=None, file=name, source="preset", preset_reason=reason,
+                     preset_alt=f"a storybook {chosen.stem.removeprefix('preset-').replace('underwater', 'underwater reef')} scene")
         log.info("preset background used  story=%s page=%d  %s  (no painting: %s)",
                  story["id"], seg["index"] + 1, name, reason)
 
@@ -366,10 +425,13 @@ class ImageWorker:
 
         SD 1.5 only reads about 75 tokens (roughly 50 words) and pays most attention to the
         beginning. The style goes first so it can never be cut off, and the place is capped."""
-        place = (seg.get("setting") or story.get("world") or story.get("premise") or "a storybook landscape")
-        place = place.strip().rstrip(".")
-        place = " ".join(place.split()[: settings.sd_prompt_words])
-        return f"{settings.sd_style}, {place}, {NO_CHARACTERS}"
+        place = without_characters(seg.get("setting") or story.get("world") or "") or "a storybook landscape"
+        # A detail that names a character is dropped whole ("a sleepy cat" is not scenery).
+        details = [d.strip().rstrip(".") for d in seg.get("visual_details") or []
+                   if d.strip() and not names_a_character(d)]
+        scene = ", ".join([place.rstrip("."), *details])
+        scene = " ".join(scene.split()[: settings.sd_prompt_words])
+        return f"{settings.sd_style}, {scene}, {NO_CHARACTERS}"
 
     def build_command(self, prompt: str, seed: int, out_path: Path, plan: dict | None = None) -> list[str]:
         # A list of arguments (never a shell string), so story text cannot inject commands.

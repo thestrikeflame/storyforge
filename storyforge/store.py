@@ -40,7 +40,9 @@ def new_segment(index: int, action: str | None, kind: str) -> dict:
         "partial": "",
         "text_complete": False,
         "visual_prompt": "",
-        "setting": "",  # where this page happens; the background is painted from it
+        "setting": "",  # the page plan: where it happens; the background is painted from it
+        "visual_details": [],  # ...2-3 things visible there (never characters)
+        "hero_action": "",  # ...and what the hero is doing (for animating the hero layer)
         "choices": [],
         "action": action,  # the reader's decision that led to this page
         "kind": kind,  # opening | choice | custom | continue | finish
@@ -166,6 +168,7 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
         "choices": seg["choices"] if seg["status"] == "ready" else [],
         "action": seg.get("action"),
         "final": bool(seg.get("final")),
+        "hero_action": seg.get("hero_action") or "",
         "error": seg.get("error"),
         "image": {
             "status": image["status"],
@@ -174,7 +177,7 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
             "url": f"/api/stories/{story['id']}/segments/{seg['index']}/image?v={image.get('attempts', 0)}"
             if has_image
             else None,
-            "alt": "a quiet storybook forest" if image.get("source") == "preset"
+            "alt": image.get("preset_alt") or "a storybook scene" if image.get("source") == "preset"
             else seg.get("setting") or seg.get("visual_prompt") or "",
             "preset": image.get("source") == "preset",  # a ready-made forest, not painted for this page
             "eta_seconds": image_eta,

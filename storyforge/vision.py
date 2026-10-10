@@ -22,6 +22,8 @@ PROMPT = (
     "25 words, say what kind of character it is and what it looks like: colours, shape, size and any "
     "clothes or special features. Describe it as if it were real: say 'a blue fish', never "
     "'a blue-outlined fish' or anything about lines, strokes or sketching. Start with 'a' or 'an'. "
+    "If it holds something like a knife, sword or other weapon, describe it as a toy or a tool "
+    "(for example 'a wooden toy sword' or 'a little kitchen knife'). "
     "Do not mention that it is a drawing or a picture, and do not give it a name."
 )
 # Used when no model can be reached, so the story still starts.

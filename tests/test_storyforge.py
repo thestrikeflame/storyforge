@@ -176,25 +176,66 @@ class Parsing(unittest.TestCase):
         page = parse_page(json.dumps({"segment": words, "choices": ["a b c"]}), False, True)
         self.assertEqual(page.choices, [])
 
-    def test_setting_comes_first_and_is_parsed(self):
-        from storyforge.llm import build_messages, parse_page, response_schema
-        self.assertEqual(list(response_schema(False, False)["properties"])[0], "setting")
-        self.assertEqual(list(response_schema(True, False)["properties"])[:2], ["title", "setting"])
+    def test_page_plan_comes_first_and_is_parsed(self):
+        from storyforge.llm import HERO_ACTIONS, SYSTEM_PROMPT, build_messages, parse_page, response_schema
+        plan = ["setting", "visual_details", "action"]
+        self.assertEqual(list(response_schema(False, False)["properties"])[:4], plan + ["segment"])
+        self.assertEqual(list(response_schema(True, False)["properties"])[:5], ["title"] + plan + ["segment"])
+        self.assertEqual(response_schema(False, False)["properties"]["action"]["enum"], list(HERO_ACTIONS))
         story = {"premise": "p", "segments": []}
         text = build_messages(story, None, False)[1]["content"]
-        self.assertLess(text.index('"setting"'), text.index('"segment"'))
+        self.assertLess(text.index('"action"'), text.index('"segment"'))
+        self.assertIn("Do not default to a forest", text)
+        self.assertIn("written from the plan above", text)
+        self.assertIn("tool or a toy", SYSTEM_PROMPT)  # knives and swords never mean violence
         words = " ".join(["word"] * 60) + "."
-        page = parse_page(json.dumps({"setting": "a windy hilltop at sunset", "segment": words}), False, False)
-        self.assertEqual(page.setting, "a windy hilltop at sunset")
+        page = parse_page(json.dumps({"setting": "a windy hilltop at sunset", "visual_details": ["a red kite", "a red kite", 3],
+                                      "action": "Jumping", "segment": words}), False, False)
+        self.assertEqual((page.setting, page.visual_details, page.hero_action), ("a windy hilltop at sunset", ["a red kite"], "jumping"))
+        page = parse_page(json.dumps({"segment": words, "action": "attacking"}), False, False)
+        self.assertEqual(page.hero_action, HERO_ACTIONS[0])  # anything off the list becomes the default
+        # broken JSON: the plan is still salvaged
+        page = parse_page('{"setting": "a castle hall", "visual_details": ["a long table", "candles"], "action": "sitting", '
+                          '"segment": "' + words + '", "choices": ["Open', False, False)
+        self.assertEqual((page.setting, page.visual_details, page.hero_action), ("a castle hall", ["a long table", "candles"], "sitting"))
+
+    def test_plan_is_only_used_once_complete(self):
+        from storyforge.llm import extract_plan
+        full = '{"setting": "a space station window", "visual_details": ["a blue planet", "tiny stars"], "action": "flying", "segment": "Once'
+        self.assertIsNone(extract_plan(full[:40]))
+        self.assertIsNone(extract_plan(full[: full.index('"action"')]))
+        self.assertIsNone(extract_plan(full[: full.index('flying') + 3]))
+        self.assertEqual(extract_plan(full), {"setting": "a space station window",
+                                              "visual_details": ["a blue planet", "tiny stars"], "action": "flying"})
+
+    def test_preset_matches_the_place(self):
+        from pathlib import Path as P
+        from storyforge.images import pick_preset
+        presets = [P(f"preset-{n}.jpg") for n in ("beach", "castle", "space", "underwater", "village")]
+        for place, want in (("a sunny sandy beach", "beach"), ("the castle throne room", "castle"),
+                            ("a rocket near the moon", "space"), ("a coral reef deep under the sea", "underwater"),
+                            ("grandma's kitchen in the village", "village")):
+            self.assertEqual(pick_preset(presets, place, 0).stem, f"preset-{want}", place)
+        self.assertEqual(pick_preset(presets, "a mysterious meadow", 7), presets[7 % 5])  # no match: steady choice
 
     def test_background_prompt_has_no_characters(self):
         from storyforge.images import NO_CHARACTERS, ImageWorker
         story = {"premise": "p", "world": "a forest", "character_look": "a purple dragon with wings"}
-        prompt = ImageWorker.build_background_prompt(story, {"setting": "a snowy village square at dusk"})
-        self.assertIn("a snowy village square at dusk", prompt)
+        prompt = ImageWorker.build_background_prompt(
+            story, {"setting": "a snowy village square at dusk", "visual_details": ["a glowing lantern", "falling snow"]})
+        self.assertIn("a snowy village square at dusk, a glowing lantern, falling snow", prompt)
         self.assertIn(NO_CHARACTERS, prompt)
         self.assertNotIn("dragon", prompt)
         self.assertIn("a forest", ImageWorker.build_background_prompt(story, {}))  # no setting yet
+        # characters that slip into the plan are never painted
+        prompt = ImageWorker.build_background_prompt(
+            story, {"setting": "Robot's Kitchen", "visual_details": ["Robot", "a ticking clock", "a sleepy cat"]})
+        self.assertIn("Kitchen, a ticking clock, " + NO_CHARACTERS, prompt)
+        self.assertNotIn("Robot", prompt)
+        self.assertNotIn("cat", prompt)
+        prompt = ImageWorker.build_background_prompt(story, {"setting": "a village square", "visual_details": [
+            "Pogo, the purple stick figure", "a kite for Mia", "Round sun in the sky", "shadows of trees"]})
+        self.assertIn("a village square, Round sun in the sky, shadows of trees, " + NO_CHARACTERS, prompt)
 
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
@@ -202,7 +243,9 @@ class Parsing(unittest.TestCase):
         story = {"premise": "p", "title": "t", "character_look": "c", "world": "w", "summary": "s",
                  "segments": [{"status": "ready", "text": long_page} for _ in range(30)]}
         text = build_messages(story, "Open the door", False)[1]["content"]
-        self.assertLess(len(text), 2600)  # only the latest page (trimmed) is sent, not all thirty
+        # Only the latest page (trimmed) is sent, not all thirty. With the page-plan instructions a
+        # realistic worst case measured 176 + 717 prompt tokens + 480 reply = ~1400 of llama-server's 2048.
+        self.assertLess(len(text), 2800)
         self.assertIn("Write page 31 only", text)
         self.assertIn("Open the door", text)
 
@@ -338,7 +381,8 @@ class Flow(unittest.TestCase):
         self.assertTrue(image["preset"])
         status, jpg = call("GET", BASE + image["url"])
         self.assertEqual((status, jpg[:3]), (200, b"\xff\xd8\xff"))
-        self.assertIn(jpg, [p.read_bytes() for p in (ROOT / "static" / "art").glob("fallback-forest-*.jpg")])
+        # the preset that fits the page's plan ("a cosy village bakery kitchen")
+        self.assertEqual(jpg, (ROOT / "static" / "art" / "preset-village.jpg").read_bytes())
         # the story carries on regardless
         status, _ = call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "after": 0})
         self.assertEqual(status, 201)
@@ -472,12 +516,13 @@ class CloudBackgrounds(unittest.TestCase):
         self.assertEqual(segment(story_id, 0, CLOUD)["status"], "writing")
         state = call("GET", f"{HF}/state")[1]
         self.assertEqual(state["last_path"], "/nscale/v1/images/generations")
-        self.assertIn("misty enchanted forest", state["last_prompt"])
+        self.assertIn("a cosy village bakery kitchen at dawn, a warm brick oven, flour on the wooden table", state["last_prompt"])
         self.assertIn("no characters", state["last_prompt"])
         self.assertNotIn("dragon", state["last_prompt"])  # the hero is drawn by the child, never painted
         page = wait_image(story_id, 0, CLOUD)
         self.assertEqual(page["image"]["status"], "completed")
-        self.assertIn("misty enchanted forest", page["image"]["alt"])
+        self.assertIn("bakery kitchen", page["image"]["alt"])
+        self.assertEqual(page["hero_action"], "waving")
         status, png = call("GET", CLOUD + page["image"]["url"])
         self.assertEqual((status, png[:8]), (200, b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(self.sd_rows(story_id), [])  # nothing painted on the Jetson
@@ -506,7 +551,7 @@ class CloudBackgrounds(unittest.TestCase):
         image = wait_image(story_id, 0, CLOUD)["image"]
         self.assertEqual(image["status"], "completed")
         self.assertTrue(image["preset"])  # neither painter worked: a preset forest
-        self.assertEqual(image["alt"], "a quiet storybook forest")
+        self.assertEqual(image["alt"], "a storybook village scene")
         self.assertEqual(len(self.sd_rows(story_id)), 1)
         FAIL_FILE.unlink()
         hf_mode("normal")
@@ -514,7 +559,7 @@ class CloudBackgrounds(unittest.TestCase):
         call("POST", f"{CLOUD}/api/stories/{story_id}/segments/0/image/retry")
         image = wait_for(lambda: (s := segment(story_id, 0, CLOUD))["image"]["status"] == "completed"
                          and not s["image"]["preset"] and s)["image"]
-        self.assertIn("misty enchanted forest", image["alt"])
+        self.assertIn("bakery kitchen", image["alt"])
         self.assertGreater(call("GET", f"{HF}/state")[1]["requests"], before)
         self.assertEqual(len(self.sd_rows(story_id)), 1)  # the cloud painted it this time
 

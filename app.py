@@ -89,11 +89,14 @@ app = FastAPI(title="StoryForge", lifespan=lifespan, docs_url=None, redoc_url=No
 def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: float) -> None:
     """Copy the story text that has arrived so far into the page, and announce the moment
     the page text is complete so narration can start before the choices are even written.
-    The page's "setting" streams in first: in cloud mode its background starts painting right away."""
+    The page plan (setting, visual details, hero action) streams in first: in cloud mode the
+    background starts painting as soon as the plan is complete."""
     if not seg.get("setting"):
-        setting, done = llm.extract_string_field(stream.raw, "setting")
-        if done and setting:
-            seg["setting"] = llm.clean_line(setting, 180)
+        plan = llm.extract_plan(stream.raw)
+        if plan:
+            seg["setting"] = plan["setting"]
+            seg["visual_details"] = plan["visual_details"]
+            seg["hero_action"] = plan["action"]
             if settings.image_mode == "huggingface":
                 worker.enqueue(story, seg)
     if seg["text_complete"]:
@@ -198,6 +201,9 @@ async def write_segment(story: dict, seg: dict) -> None:
     seg["visual_prompt"] = page.visual_prompt
     if page.setting and not seg.get("setting"):
         seg["setting"] = page.setting
+        seg["visual_details"] = page.visual_details
+    if not seg.get("hero_action"):
+        seg["hero_action"] = page.hero_action
     seg["choices"] = page.choices
     seg["error"] = None
     seg["status"] = "ready"

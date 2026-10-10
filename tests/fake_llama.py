@@ -52,10 +52,15 @@ def build_reply(user_text: str) -> dict:
     reply: dict = {}
     if first:
         reply["title"] = "Mira and the Tenth Mushroom"
-    reply["setting"] = (
-        "a misty enchanted forest of ancient oaks and glowing mushrooms at dawn"
-        if number == 1 else f"a moonlit pond ringed with lily pads at night, scene {number}"
-    )
+    # The page plan comes first: setting, visual_details, action.
+    if number == 1:
+        reply["setting"] = "a cosy village bakery kitchen at dawn"
+        reply["visual_details"] = ["a warm brick oven", "flour on the wooden table", "morning sun through the window"]
+        reply["action"] = "waving"
+    else:
+        reply["setting"] = f"a sunny sandy beach beside a red lighthouse, scene {number}"
+        reply["visual_details"] = ["seashells in the sand", "a striped beach umbrella"]
+        reply["action"] = "walking"
     reply["segment"] = ENDING if final else PAGES[(number - 1) % len(PAGES)]
     if first:
         reply["character_look"] = "a small purple baby dragon with large amber eyes and tiny wings"
