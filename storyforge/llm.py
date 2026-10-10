@@ -33,9 +33,7 @@ SYSTEM_PROMPT = (
     "You are StoryForge, a storyteller who writes an illustrated story one page at a time "
     "together with a reader. Unless the reader's idea clearly asks for an older audience, "
     "write for children aged 5 to 10: warm, vivid, simple sentences, never frightening or violent. "
-    "Keep it gentle: nobody is hurt, attacked or fought. If the hero has something like a knife, sword "
-    "or other weapon, it is a tool or a toy: for cooking, carving, building or a pretend quest, never for "
-    "fighting. "
+    "Keep it gentle: nobody is hurt, attacked or fought. "
     "Each page has at least {min_words} and at most {max_words} words, in two or three short "
     "paragraphs, told in the past tense. Keep names, looks and places consistent with what came before. "
     "Never wrap up the whole story unless you are told it is the last page. "
@@ -73,6 +71,23 @@ _SUMMARY_KEY = (
 )
 
 
+# Weapon-like things a child might draw. Prompts never name these (naming them makes the model add
+# them); only when the hero's description already contains one is a "toy or tool" line added.
+_WEAPON = re.compile(
+    r"\b(knife|knives|sword|swords|sabre|saber|dagger|daggers|blade|blades|axe|axes|hatchet|spear|spears|"
+    r"lance|bow and arrows?|arrows?|crossbow|gun|guns|pistol|rifle|cannon|cannons|bomb|bombs|grenade|"
+    r"club|mace|whip|trident|scythe|machete|katana|weapon|weapons)\b", re.I)
+
+
+def weapon_rule(description: str) -> str:
+    """One line for the storyteller, only when the drawn hero already has a weapon-like thing."""
+    found = _WEAPON.search(description or "")
+    if not found:
+        return ""
+    return (f"The {found.group(1).lower()} the hero was drawn with is only a toy or a tool here, for play, "
+            "cooking or building; it is never used to hurt or scare anyone.\n")
+
+
 def hero_notes(description: str) -> tuple[str, list[str]]:
     """Split the vision description into the kind of character and a few short features, so the
     storyteller gets notes to use rather than a sentence to copy.
@@ -102,7 +117,9 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
                 + (f" Notes: {'; '.join(features)}." if features else "")
                 + " Make it the main character. Choose its name in \"hero_name\" and begin the page with "
                 "that name. Tell what the hero does, in fresh story words; never list its looks in one "
-                "long sentence. Mention one of the notes naturally, later in the page.\n\n"
+                "long sentence. Mention one of the notes naturally, later in the page. The hero only holds "
+                "or uses things that are in these notes.\n"
+                + weapon_rule(hero) + "\n"
             )
         user = (
             f"The reader's idea for the story:\n\"{story['premise']}\"\n\n"
@@ -140,6 +157,9 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             f"The reader's original idea: \"{story['premise']}\"\n"
             + (f"Main character's name: {story['hero_name']}\n" if story.get("hero_name") else "")
             + f"Main character looks like: {story.get('character_look') or 'not described yet'}\n"
+            + ("The hero only holds or uses things from how it looks, or things it finds in the story.\n"
+               + weapon_rule(story["hero_description"]) if story.get("hero_description") else "")
+            +
             f"Setting: {story.get('world') or 'not described yet'}\n"
             f"Previous page's place: {ready[-1].get('setting') or 'not described'} "
             "(stay there or move somewhere new, as the story needs)\n"

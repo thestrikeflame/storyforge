@@ -187,7 +187,8 @@ class Parsing(unittest.TestCase):
         self.assertLess(text.index('"action"'), text.index('"segment"'))
         self.assertIn("Do not default to a forest", text)
         self.assertIn("written from the plan above", text)
-        self.assertIn("tool or a toy", SYSTEM_PROMPT)  # knives and swords never mean violence
+        self.assertIn("Keep it gentle: nobody is hurt", SYSTEM_PROMPT)
+        self.assertNotIn("sword", SYSTEM_PROMPT)  # naming weapons makes the model add them
         words = " ".join(["word"] * 60) + "."
         page = parse_page(json.dumps({"setting": "a windy hilltop at sunset", "visual_details": ["a red kite", "a red kite", 3],
                                       "action": "Jumping", "segment": words}), False, False)
@@ -214,6 +215,29 @@ class Parsing(unittest.TestCase):
         page = (ROOT / "static" / "index.html").read_text()
         for needle in ('id="line-boil-noise"', "feDisplacementMap", 'src="/static/hero.js"', 'class="hero-shadow"', 'id="hero-fx"'):
             self.assertIn(needle, page)
+
+    def test_no_weapon_words_unless_the_drawing_has_one(self):
+        from storyforge import vision
+        from storyforge.llm import _WEAPON, build_messages
+        def prompts(description: str) -> list[str]:
+            story = {"premise": "A story starring a small blue fish", "hero_description": description, "segments": []}
+            first = build_messages(story, None, False)
+            story.update(title="T", hero_name="Blue", character_look=description, summary="s",
+                         segments=[{"status": "ready", "text": "Blue swam.", "setting": "a reef"}])
+            later = build_messages(story, "Swim to the cave", False)
+            return [m["content"] for m in first + later]
+        calm = "a small blue fish with a yellow crown, one black eye, and a red tail"
+        for text in prompts(calm) + [vision.PROMPT]:
+            self.assertIsNone(_WEAPON.search(text), _WEAPON.search(text) and _WEAPON.search(text).group(0))
+        first_user, later_user = prompts(calm)[1], prompts(calm)[3]
+        self.assertIn("The hero only holds or uses things that are in these notes.", first_user)
+        self.assertIn("The hero only holds or uses things from how it looks", later_user)
+        # a weapon in the drawing itself: one line, naming it, saying it is a toy or a tool
+        armed = prompts("a green dragon with a horn and a wooden sword with a yellow handle")
+        for user in (armed[1], armed[3]):
+            self.assertEqual(user.count("toy or a tool"), 1)
+            self.assertIn("The sword the hero was drawn with is only a toy or a tool here", user)
+        self.assertNotIn("toy or a tool", armed[0])  # the system prompt never mentions it
 
     def test_hero_notes_and_name_field(self):
         from storyforge.llm import hero_notes, response_schema
