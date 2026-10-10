@@ -88,6 +88,91 @@ def weapon_rule(description: str) -> str:
             "cooking or building; it is never used to hurt or scare anyone.\n")
 
 
+# ---------------------------------------------------------------- the reader's choice
+
+# Scary or violent choices are made gentle before the storyteller sees them (in Python, so the
+# prompts never have to name violence). Order matters: longer phrases first.
+_SOFTEN = [
+    (r"\b(?:scare|chase|frighten)\s+(.+?)\s+away\b", r"make friends with \1"),
+    (r"\b(?:beat up|fight with|fight against|fight|battle|attack|kill|slay|defeat|destroy|hurt|hit|punch|kick|"
+     r"stab|shoot|bite|smash|crush|murder|capture|trap|chase away|scare away|scare)\b", "make friends with"),
+    (r"\bsteal\b", "borrow"),
+]
+_WEAPON_PHRASE = re.compile(r"\s*\b(?:with|using)\s+(?:a|an|the|his|her|its|their|my)?\s*(?:\w+\s+)?" + _WEAPON.pattern[2:-2] + r"\b", re.I)
+
+
+def soften_choice(choice: str) -> str:
+    """"fight the dragon with a sword" -> "make friends with the dragon". Gentle choices pass unchanged."""
+    text = _WEAPON_PHRASE.sub("", choice)
+    for pattern, gentle in _SOFTEN:
+        text = re.sub(pattern, gentle, text, flags=re.I)
+    text = re.sub(r"\bmake friends with\s+(?:with|against)\s+", "make friends with ", text, flags=re.I)
+    text = " ".join(text.split())
+    if text and choice[:1].isupper():
+        text = text[0].upper() + text[1:]
+    return text or choice
+
+
+_SMALL_WORDS = frozenset("""
+    a an the and or but to of in on at by for from with into onto over under up down out off away about
+    as is are was were be been it its it's he she they them their his her him we you your our my i me
+    this that these those there here then now just very really so too all some any more much one two
+    go goes going went get gets got let lets make makes made take takes try tries do does did can will
+    see sees look looks find finds new little big
+""".split())
+
+
+def _stem(word: str) -> str:
+    word = word.lower().strip("'")
+    for suffix in ("ing", "ed", "es", "ly", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    return word[:5]
+
+
+def choice_words(choice: str, known: str = "") -> set[str]:
+    """The main words of a choice, stemmed. Words already in `known` (the previous page) prove
+    nothing, so they are left out, unless that would leave nothing to check."""
+    words = {_stem(w) for w in re.findall(r"[A-Za-z']+", choice) if w.lower() not in _SMALL_WORDS and len(w) > 2}
+    seen = {_stem(w) for w in re.findall(r"[A-Za-z']+", known)}
+    return (words - seen) or words
+
+
+def choice_followed(choice: str, page: str, known: str = "") -> bool:
+    """True when the page shares at least one main word with the reader's choice."""
+    wanted = choice_words(choice, known)
+    if not wanted:
+        return True
+    found = {_stem(w) for w in re.findall(r"[A-Za-z']+", page)}
+    return bool(wanted & found)
+
+
+def bridge_sentence(choice: str, hero: str | None) -> str:
+    """A short opening that carries out the choice, for a page that ignored it twice.
+    Offered choices start with a verb ("Open the door" -> "So Mira decided to open the door.");
+    anything else the reader said is told as it is ("the jars wake up" -> "And then, the jars wake up.")."""
+    text = choice.strip().rstrip(".!?")
+    first = text.split()[0].lower() if text else ""
+    starts_with_subject = first in {"i", "we", "he", "she", "they", "it", "the", "a", "an", "my", "our", "his",
+                                    "her", "their", "everyone", "everybody", "somebody", "someone"} or (
+        text[:1].isupper() and hero and text.lower().startswith(hero.lower()))
+    if starts_with_subject:
+        return f"And then, {text[0].lower() + text[1:] if first != 'i' else text}."
+    return f"So {hero or 'our hero'} decided to {text[0].lower() + text[1:]}."
+
+
+def short_summary(summary: str) -> str:
+    """At most two sentences of the running summary, so the reader's choice isn't drowned out."""
+    sentences = re.split(r"(?<=[.!?])\s+", (summary or "").strip())
+    return " ".join(sentences[:2]).strip()
+
+
+def last_sentence(text: str) -> str:
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s]
+    return sentences[-1][:240] if sentences else ""
+
+
 def hero_notes(description: str) -> tuple[str, list[str]]:
     """Split the vision description into the kind of character and a few short features, so the
     storyteller gets notes to use rather than a sentence to copy.
@@ -113,7 +198,7 @@ def hero_notes(description: str) -> tuple[str, list[str]]:
     return kind.strip(" ,.") or text, features[:3]
 
 
-def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
+def build_messages(story: dict, action: str | None, final: bool, event: str | None = None) -> list[dict]:
     """Build the chat messages for the next page. Sends a compact summary plus only the
     most recent page, never the whole history, so the 2048-token context is not exceeded."""
     system = SYSTEM_PROMPT.format(
@@ -148,14 +233,17 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
             '"title": a title for the story, at most 6 words.\n'
             + _PLAN_KEYS
             + ('"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n' if hero else "") +
-            '"segment": the text of page 1, written from the plan above.\n'
+            '"segment": the text of page 1, written from the plan above: '
+            f'{settings.segment_min_words} to {settings.segment_max_words} words in two or three paragraphs.\n'
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
             '"world": the setting in at most 20 words.\n'
             + _COMMON_KEYS + _CHOICES_KEY + _SUMMARY_KEY
         )
     else:
-        previous = ready[-1]["text"][-900:]
+        # Only a short summary and the last sentence of the previous page: the full text would drown
+        # out the reader's choice, which a small model then ignores.
+        ended = last_sentence(ready[-1]["text"])
         if final:
             task = (
                 f"Write page {page_number}, the LAST page. Bring the story to a warm, satisfying "
@@ -181,23 +269,36 @@ def build_messages(story: dict, action: str | None, final: bool) -> list[dict]:
                if story.get("hero_description") else "")
             +
             f"Setting: {story.get('world') or 'not described yet'}\n"
-            f"Previous page's place: {ready[-1].get('setting') or 'not described'} "
-            "(stay there or move somewhere new, as the story needs)\n"
-            f"Story so far: {story.get('summary') or 'see the previous page'}\n\n"
-            f"Previous page:\n{previous}\n\n"
+            f"Previous page's place: {ready[-1].get('setting') or 'not described'}"
+            + (" (move somewhere new when the reader's choice goes somewhere)\n" if event
+               else " (stay there or move somewhere new, as the story needs)\n")
+            +
+            f"Story so far: {short_summary(story.get('summary')) or 'see below'}\n"
+            f"Where the last page ended: {ended}\n\n"
             f"The reader decided: \"{decision}\"\n\n"
             f"{task}\n\n"
             "Use these JSON keys in this order:\n"
+            + (f'"event": "{event}" (already filled in: the reader\'s choice. The setting, details, '
+               "action and the whole page follow from it.)\n"
+               f'The "setting" is where this event happens: if it goes somewhere new, that new place. '
+               f'The "action" is what the hero does in this event.\n' if event else "")
             + _PLAN_KEYS +
-            f'"segment": the text of page {page_number}, written from the plan above.\n'
+            f'"segment": the text of page {page_number}, written from the plan above: '
+            f'{settings.segment_min_words} to {settings.segment_max_words} words in two or three paragraphs.\n'
             + _COMMON_KEYS + choices_key + _SUMMARY_KEY
+            # Last, because a small model follows the last instruction best.
+            + (f"\n\nThis page must show: {event}" if event else "")
         )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def response_schema(first: bool, final: bool, drawn_hero: bool = False) -> dict:
-    """JSON schema handed to llama-server so its grammar forces well-formed output."""
+def response_schema(first: bool, final: bool, drawn_hero: bool = False, event: str | None = None) -> dict:
+    """JSON schema handed to llama-server so its grammar forces well-formed output.
+    `event` (the reader's choice) is a constant first property: the grammar writes it into the plan
+    before the model plans the setting and action, so the plan starts from the choice."""
     props: dict = {}
+    if event:
+        props["event"] = {"type": "string", "const": event}
     if first:
         props["title"] = {"type": "string"}
     props["setting"] = {"type": "string"}

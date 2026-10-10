@@ -86,11 +86,13 @@ app = FastAPI(title="StoryForge", lifespan=lifespan, docs_url=None, redoc_url=No
 # Writing a page
 # --------------------------------------------------------------------------
 
-def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: float) -> None:
+def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: float, check: dict | None = None) -> None:
     """Copy the story text that has arrived so far into the page, and announce the moment
     the page text is complete so narration can start before the choices are even written.
     The page plan (setting, visual details, hero action) streams in first: in cloud mode the
-    background starts painting as soon as the plan is complete."""
+    background starts painting as soon as the plan is complete.
+    With a reader's choice to `check`, the text only counts as complete (and narration only starts)
+    once it shows the choice; on the last try a bridge sentence carries the choice out instead."""
     if not seg.get("setting"):
         plan = llm.extract_plan(stream.raw)
         if plan:
@@ -107,6 +109,15 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
     cleaned = llm.clean_text(text, 1800)
     seg["partial"] = cleaned
     if complete and llm.word_count(cleaned) >= llm.minimum_words() and '"visual_prompt"' not in cleaned:
+        if check:
+            if llm.choice_followed(check["event"], cleaned, check["known"]):
+                seg["choice_check"] = "passed" if check["attempt"] == 1 else "passed on retry"
+            elif check["attempt"] == 1:
+                return  # not shown as finished: write_segment asks once more
+            else:
+                cleaned = f"{llm.bridge_sentence(check['event'], check['hero'])} {cleaned}"
+                seg["choice_check"] = "bridged"
+                seg["partial"] = cleaned
         seg["text"] = cleaned
         seg["text_complete"] = True
         seg["timings"]["text_seconds"] = round(time.monotonic() - started, 1)
@@ -131,14 +142,19 @@ async def write_segment(story: dict, seg: dict) -> None:
     mem_before = memory_mb()["available"]
     page: llm.Page | None = None
     stream: llm.LLMStream | None = None
+    # The reader's own choice (not "continue" or "finish") is the page's event: it opens the plan,
+    # closes the prompt, and the page is checked for it.
+    event = seg["action"] if seg["kind"] in ("choice", "custom") and seg["action"] else None
+    known = story["segments"][seg["index"] - 1]["text"] if seg["index"] > 0 else ""
     try:
         async with llm_lock:
             if story.get("abandoned"):
                 return
             for attempt in (1, 2):
+                check = {"event": event, "known": known, "hero": story.get("hero_name"), "attempt": attempt} if event else None
                 stream = llm.LLMStream(
-                    messages=llm.build_messages(story, seg["action"], final),
-                    schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description"))),
+                    messages=llm.build_messages(story, seg["action"], final, event=event),
+                    schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description")), event=event),
                     temperature=settings.llm_temperature if attempt == 1 else 0.5,
                 )
                 active_streams[story["id"]] = stream
@@ -146,7 +162,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                 try:
                     while not job.done():
                         await asyncio.sleep(0.2)
-                        _update_partial(story, seg, stream, started)
+                        _update_partial(story, seg, stream, started, check)
                     raw = job.result()
                 except llm.WriterOffline as exc:
                     _fail(story, seg, "writer_offline", str(exc))
@@ -163,9 +179,19 @@ async def write_segment(story: dict, seg: dict) -> None:
                         log.warning("page attempt %d failed (%s); trying once more", attempt, exc)
                         seg["partial"] = ""
                         continue
-                _update_partial(story, seg, stream, started)
+                _update_partial(story, seg, stream, started, check)
                 try:
                     page = llm.parse_page(raw, first, final, last_try=attempt == 2)
+                    if event and not seg["text_complete"] and not llm.choice_followed(event, page.segment, known):
+                        if attempt == 1:
+                            log.warning("choice check  story=%s page=%d  missed %r; writing the page once more",
+                                        story["id"], seg["index"] + 1, event)
+                            seg["partial"] = ""
+                            seg["choice_check"] = "missed"
+                            page = None
+                            continue
+                        page.segment = f"{llm.bridge_sentence(event, story.get('hero_name'))} {page.segment}"
+                        seg["choice_check"] = "bridged"
                     break
                 except llm.WriterFailed as exc:
                     if seg["text_complete"]:
@@ -226,6 +252,12 @@ async def write_segment(story: dict, seg: dict) -> None:
     if final:
         story["ended"] = True
 
+    if event:
+        log.info(
+            "choice check  story=%s page=%d  choice=%r  plan: setting=%r details=%s action=%s  result=%s",
+            story["id"], seg["index"] + 1, event, seg.get("setting"), seg.get("visual_details"),
+            seg.get("hero_action"), seg.get("choice_check") or "passed",
+        )
     total = round(time.monotonic() - started, 1)
     seg["timings"].update(
         first_token_seconds=round(stream.first_token_seconds, 1) if stream and stream.first_token_seconds else None,
@@ -449,6 +481,11 @@ async def continue_story(story_id: str, body: NextPage):
     action = llm.clean_line(body.action, settings.max_action_chars)
     if kind in ("choice", "custom") and len(action) < 2:
         raise HTTPException(422, "Say or type what should happen next.")
+    if kind in ("choice", "custom"):
+        gentle = llm.soften_choice(action)
+        if gentle != action:
+            log.info("choice softened  story=%s  %r -> %r", story["id"], action, gentle)
+            action = gentle
     if kind == "continue":
         action = "Continue the adventure"
     if kind == "finish":

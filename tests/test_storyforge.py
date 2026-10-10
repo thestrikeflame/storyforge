@@ -246,6 +246,27 @@ class Parsing(unittest.TestCase):
             self.assertIn("The sword the hero was drawn with is only a toy or a tool here", user)
         self.assertNotIn("toy or a tool", armed[0])  # the system prompt never mentions it
 
+    def test_choice_helpers(self):
+        from storyforge.llm import bridge_sentence, choice_followed, response_schema, short_summary, soften_choice
+        for scary, gentle in (("fight the dragon", "make friends with the dragon"),
+                              ("Attack the castle with a big sword", "Make friends with the castle"),
+                              ("scare the ghost away", "make friends with the ghost"),
+                              ("steal the golden key", "borrow the golden key"),
+                              ("Open the tiny wooden door", "Open the tiny wooden door"),
+                              ("eat the cake", "eat the cake")):
+            self.assertEqual(soften_choice(scary), gentle)
+        self.assertTrue(choice_followed("Knock and wait politely", "Mira knocked twice and waited."))
+        self.assertFalse(choice_followed("Open the tiny wooden door", "Mira flew to the moon."))
+        # words the previous page already had prove nothing: "Pim" alone doesn't count
+        self.assertFalse(choice_followed("Follow Pim to the pond", "Pim smiled.", known="Pim the moth waved."))
+        self.assertTrue(choice_followed("Follow Pim to the pond", "They reached the pond.", known="Pim the moth waved."))
+        self.assertEqual(bridge_sentence("Open the tiny wooden door", "Mira"), "So Mira decided to open the tiny wooden door.")
+        self.assertEqual(bridge_sentence("the jars wake up and sing", None), "And then, the jars wake up and sing.")
+        self.assertEqual(short_summary("One. Two. Three. Four."), "One. Two.")
+        props = list(response_schema(False, False, event="Open the door")["properties"])
+        self.assertEqual(props[:2], ["event", "setting"])
+        self.assertNotIn("event", response_schema(False, False)["properties"])
+
     def test_hero_notes_and_name_field(self):
         from storyforge.llm import hero_notes, response_schema
         self.assertEqual(hero_notes("a small blue fish with a yellow crown, one black eye, and a red triangular tail"),
@@ -364,8 +385,15 @@ class Flow(unittest.TestCase):
         self.assertEqual(second["status"], "ready")
         sent = call("GET", f"{LLM}/state")[1]["last_user"]
         self.assertIn("Open the tiny wooden door", sent)       # the decision
-        self.assertIn("Story so far: Mira", sent)               # the continuity summary
-        self.assertIn("ten. The tenth mushroom", sent)          # the previous page
+        self.assertIn("Story so far: Mira", sent)               # a short summary
+        # only the last sentence of the previous page, not its full text
+        self.assertIn("Where the last page ended: A warm light flickered under it", sent)
+        self.assertNotIn("ten. The tenth mushroom", sent)
+        self.assertTrue(sent.endswith("This page must show: Open the tiny wooden door"))  # the choice comes last
+        schema = call("GET", f"{LLM}/state")[1]["last_schema"]
+        self.assertEqual(list(schema["properties"])[:2], ["event", "setting"])  # ...and opens the plan
+        self.assertEqual(schema["properties"]["event"]["const"], "Open the tiny wooden door")
+        self.assertIn("Mira chose to open the tiny wooden door", second["text"])
         self.assertIn("purple baby dragon", sent)               # the character's look
         # custom idea, then plain continue, then the ending
         call("POST", f"{BASE}/api/stories/{story_id}/continue",
@@ -546,6 +574,34 @@ class Flow(unittest.TestCase):
         self.assertIn("--vae-tiling", rows[1])
         self.assertIn("--steps 8 ", rows[1])
         self.assertIn("classic", call("GET", f"{BASE}/api/health")[1]["pictures"]["mode"])
+
+    def test_14_the_choice_is_followed_retried_or_bridged(self):
+        story_id = new_story()
+        wait_ready(story_id, 0)
+        log_file = TMP / "logs" / "storyforge.log"
+        # ignored once: the page is written again and then follows the choice
+        call("POST", f"{LLM}/control", {"ignore_choice": 1})
+        before = call("GET", f"{LLM}/state")[1]["requests"]
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "choice", "action": "Knock and wait politely", "after": 0})
+        page = wait_ready(story_id, 1)
+        self.assertEqual(call("GET", f"{LLM}/state")[1]["requests"] - before, 2)
+        self.assertTrue(page["text"].startswith("Mira chose to knock and wait politely."), page["text"][:80])
+        self.assertIn("choice='Knock and wait politely'", log_file.read_text())
+        self.assertIn("result=passed on retry", log_file.read_text())
+        # ignored twice: a bridge sentence carries the choice out (none of these words is on the fake's page)
+        call("POST", f"{LLM}/control", {"ignore_choice": 2})
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "choice", "action": "Climb the tallest oak tree", "after": 1})
+        page = wait_ready(story_id, 2)
+        self.assertTrue(page["text"].startswith("So our hero decided to climb the tallest oak tree. "), page["text"][:80])
+        self.assertIn("result=bridged", log_file.read_text())
+        # a scary choice is made gentle before the storyteller sees it
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "custom", "action": "fight the dragon with a sword", "after": 2})
+        page = wait_ready(story_id, 3)
+        sent = call("GET", f"{LLM}/state")[1]["last_user"]
+        self.assertTrue(sent.endswith("This page must show: make friends with the dragon"))
+        self.assertNotIn("fight", sent)
+        self.assertNotIn("sword", sent)
+        self.assertIn("Mira chose to make friends with the dragon", page["text"])
 
     def test_12_writer_offline(self):
         llm_mode("error500")

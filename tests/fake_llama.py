@@ -9,13 +9,16 @@ while running:  POST /control {"mode": "..."}  with one of:
   garbage       plain prose, no JSON at all
   no_schema     reject response_format json_schema with HTTP 400 (like an old build)
   error500      always answer HTTP 500
+POST /control {"ignore_choice": n} makes the next n pages leave out the reader's choice (the
+"event" the schema fills in); otherwise a page starts by acting it out, as a good model would.
 """
 import json
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-STATE = {"mode": "normal", "delay": 0.01, "requests": 0, "last_user": "", "last_format": None}
+STATE = {"mode": "normal", "delay": 0.01, "requests": 0, "last_user": "", "last_format": None,
+         "ignore_choice": 0, "last_schema": None}
 
 PAGES = [
     "Mira was a small purple dragon, no bigger than a watering can, and she lived at the edge of the Whispering Wood. "
@@ -41,7 +44,7 @@ ENDING = (
 )
 
 
-def build_reply(user_text: str) -> dict:
+def build_reply(user_text: str, event: str | None = None) -> dict:
     final = "LAST page" in user_text
     first = "Write page 1 only" in user_text
     number = 1
@@ -50,6 +53,8 @@ def build_reply(user_text: str) -> dict:
     if m:
         number = int(m.group(1))
     reply: dict = {}
+    if event:
+        reply["event"] = event  # the grammar writes the const first, before anything the model chooses
     if first:
         reply["title"] = "Mira and the Tenth Mushroom"
     # The page plan comes first: setting, visual_details, action.
@@ -64,6 +69,11 @@ def build_reply(user_text: str) -> dict:
     if first and '"hero_name"' in user_text:
         reply["hero_name"] = "Captain Whiskers"
     reply["segment"] = ENDING if final else PAGES[(number - 1) % len(PAGES)]
+    if event:
+        if STATE["ignore_choice"] > 0:
+            STATE["ignore_choice"] -= 1
+        else:
+            reply["segment"] = f"Mira chose to {event[0].lower() + event[1:]}. " + reply["segment"]
     if first:
         reply["character_look"] = "a small purple baby dragon with large amber eyes and tiny wings"
         reply["world"] = "an enchanted forest of ancient oaks and glowing mushrooms"
@@ -114,6 +124,13 @@ class Handler(BaseHTTPRequestHandler):
         STATE["requests"] += 1
         STATE["last_user"] = body["messages"][-1]["content"]
         fmt = (body.get("response_format") or {}).get("type")
+        schema = ((body.get("response_format") or {}).get("json_schema") or {}).get("schema") or {}
+        STATE["last_schema"] = schema
+        event = (schema.get("properties") or {}).get("event", {}).get("const")
+        if not event:  # no grammar (an old build): a model would still read the prompt's last line
+            import re
+            found = re.search(r"This page must show: (.+)$", body["messages"][-1]["content"])
+            event = found.group(1) if found else None
         STATE["last_format"] = fmt
         mode = STATE["mode"]
         if mode == "error500":
@@ -121,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
         if mode == "no_schema" and fmt == "json_schema":
             return self._json(400, {"error": {"message": "unsupported response_format"}})
 
-        text = json.dumps(build_reply(STATE["last_user"]), ensure_ascii=False)
+        text = json.dumps(build_reply(STATE["last_user"], event), ensure_ascii=False)
         if mode == "fenced":
             text = "Sure! Here is the page:\n```json\n" + text + "\n```\nHope you like it."
         elif mode == "truncated":
