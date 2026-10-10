@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from storyforge import llm, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
-from storyforge.images import ImageWorker, preset_backgrounds
+from storyforge.images import ImageWorker, hero_words, preset_backgrounds, worn_or_about_the_hero
 from storyforge.store import StoryStore, hero_path, new_segment, new_story, segment_view, story_view
 from storyforge.sysinfo import log, memory_mb, setup_logging, timings
 
@@ -102,7 +102,7 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
             seg["visual_details"] = plan["visual_details"]
             seg["hero_action"] = plan["action"]
             seg["prop_names"] = plan["props"]
-            seg["props"] = llm.prop_emoji(plan["props"])
+            _choose_props(story, seg)
             if settings.image_mode == "huggingface":
                 worker.enqueue(story, seg)
     if seg["text_complete"]:
@@ -126,9 +126,18 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
             seg["choice_check"] = "bridged"
             seg["partial"] = cleaned
     seg["text"] = cleaned
+    _choose_props(story, seg, cleaned)
     seg["text_complete"] = True
     seg["timings"]["text_seconds"] = round(time.monotonic() - started, 1)
     narrator.prepare(story["id"], seg["index"], cleaned)
+
+
+def _choose_props(story: dict, seg: dict, text: str = "") -> None:
+    """The emoji shown beside the hero: what the text says it holds or uses first, then the plan's
+    props; never something it wears or anything from its own description (the drawing has those)."""
+    hero = hero_words(story)
+    seg["props"] = llm.choose_props(seg.get("prop_names") or [], text,
+                                    skip=lambda prop: worn_or_about_the_hero(prop, hero))
 
 
 def _draft(raw: str) -> str:
@@ -276,7 +285,7 @@ async def write_segment(story: dict, seg: dict) -> None:
         seg["hero_action"] = page.hero_action
     if not seg.get("prop_names") and page.props:
         seg["prop_names"] = page.props
-        seg["props"] = llm.prop_emoji(page.props)
+    _choose_props(story, seg, seg["text"])  # now the text can say what the hero holds
     seg["choices"] = page.choices
     seg["error"] = None
     seg["status"] = "ready"

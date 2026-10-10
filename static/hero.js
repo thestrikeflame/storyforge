@@ -152,6 +152,8 @@
           whenActionEnds(mine);
         }, reduceMotion.matches ? 0 : START_MS);
       },
+      // Swap the props without restarting the action (the finished text named what the hero holds).
+      props: showProps,
       // Call when the picture frame changes state (painted, waiting, failed...).
       refresh,
       stop() {

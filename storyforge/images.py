@@ -106,12 +106,17 @@ def _word_key(word: str) -> str:
 
 
 # Things a character wears or holds. A plan detail with one of these is not scenery ("a cowboy hat"
-# would be painted as a giant hat in a field), so it is dropped whole.
-WORN_OR_HELD_WORDS = frozenset(map(_word_key, """
+# would be painted as a giant hat in a field), so it is dropped whole. Worn things are never shown
+# as props either: the drawing already has them.
+WORN_WORDS = frozenset(map(_word_key, """
     hat cap crown tiara helmet hood bonnet cape cloak scarf boot shoe sock glove mitten coat jacket
     dress shirt skirt trousers pants jeans belt vest apron tie bowtie necklace bracelet ring earring
-    glasses goggles mask costume outfit uniform clothes backpack bag satchel purse wand sword shield
-    lasso spear bow arrow umbrella toy doll teddy badge medal sneaker sandal slipper pocket
+    glasses sunglasses goggles mask costume outfit uniform clothes clothing backpack badge medal
+    sneaker sandal slipper pocket ribbon bow headband bandana collar sweater jumper hoodie robe gown
+    tutu wig
+""".split()))
+WORN_OR_HELD_WORDS = WORN_WORDS | frozenset(map(_word_key, """
+    bag satchel purse wand sword shield lasso spear arrow umbrella toy doll teddy
 """.split()))
 # Words in a hero's description that say nothing about what the hero *is* (colours, sizes, filler),
 # so they stay allowed in the background ("a blue sky" is fine with a blue hero).
@@ -142,6 +147,13 @@ def is_scenery(detail: str, hero: frozenset[str]) -> bool:
     character, not anything worn or held, and nothing about the hero."""
     keys = {_word_key(w) for w in detail.split()}
     return not (names_a_character(detail) or keys & WORN_OR_HELD_WORDS or keys & hero)
+
+
+def worn_or_about_the_hero(prop: str, hero: frozenset[str]) -> bool:
+    """A prop that is really part of the hero (something it wears, or any word of its description
+    or name): the drawing already shows it, so it is not shown again as an emoji."""
+    keys = {_word_key(w) for w in prop.split()}
+    return bool(keys & WORN_WORDS or keys & hero)
 
 
 def preset_backgrounds() -> list[Path]:

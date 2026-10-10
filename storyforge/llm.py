@@ -636,10 +636,9 @@ PROP_EMOJI = {
     "present": "🎁", "box": "📦", "basket": "🧺", "bucket": "🪣", "umbrella": "☂️", "lantern": "🏮",
     "lamp": "🪔", "candle": "🕯️", "torch": "🔦", "flashlight": "🔦", "magnifying glass": "🔍",
     "telescope": "🔭", "compass": "🧭", "bell": "🔔", "drum": "🥁", "guitar": "🎸", "violin": "🎻",
-    "trumpet": "🎺", "flute": "🪈", "wand": "🪄", "magic wand": "🪄", "crown": "👑", "hat": "🎩",
-    "ribbon": "🎀", "bow": "🎀", "rope": "🪢", "fishing rod": "🎣", "shovel": "🪏",
+    "trumpet": "🎺", "flute": "🪈", "wand": "🪄", "magic wand": "🪄", "rope": "🪢", "fishing rod": "🎣", "shovel": "🪏",
     "spade": "🪏", "watering can": "🪣", "magnet": "🧲", "clock": "⏰", "camera": "📷", "phone": "📱",
-    "jar": "🫙", "potion": "🧪", "trophy": "🏆", "medal": "🏅", "coin": "🪙", "coins": "🪙",
+    "jar": "🫙", "potion": "🧪", "trophy": "🏆", "coin": "🪙", "coins": "🪙",
     "snowball": "❄️", "snowflake": "❄️", "bubble": "🫧", "heart": "❤️", "rainbow": "🌈",
 }
 
@@ -669,6 +668,54 @@ def prop_emoji(props: list[str]) -> list[dict]:
                 break
         if emoji:
             out.append({"name": prop, "emoji": emoji})
+    return out
+
+
+# "...held the map", "unfolded her old map", "picked up a shiny shell": the hero holding or using
+# something. The object is the first known prop word within the next few words.
+_HOLDING = re.compile(
+    r"\b(?:holds?|holding|held|carr(?:y|ies|ied|ying)|clutch(?:es|ed|ing)?|grip(?:s|ped|ping)?|"
+    r"grab(?:s|bed|bing)?|hug(?:s|ged|ging)?|picks? up|picked up|picking up|took out|takes? out|"
+    r"pulled out|pulls? out|unfold(?:s|ed|ing)?|unroll(?:s|ed|ing)?|open(?:s|ed|ing)?|reads?|reading|"
+    r"use(?:s|d)?|using|wav(?:es|ed|ing)|lift(?:s|ed|ing)?|rais(?:es|ed|ing)|toss(?:es|ed|ing)?|"
+    r"thr(?:ew|ows?|owing)|kick(?:s|ed|ing)?|ate|eats?|eating|munch(?:es|ed|ing)?|bl(?:ew|ows?|owing)|"
+    r"play(?:s|ed|ing)|r(?:ang|ings?|inging)|shook|shak(?:es|ing)|point(?:s|ed|ing)|check(?:s|ed|ing)?|"
+    r"studi(?:es|ed)|studying|look(?:s|ed|ing)? at|peer(?:s|ed|ing)? at|turn(?:s|ed|ing)?)"
+    r"\b", re.I)
+
+
+def held_in_text(text: str) -> list[str]:
+    """The props the page says the hero holds or uses, in order, as their map words ("map")."""
+    found: list[str] = []
+    for match in _HOLDING.finditer(text or ""):
+        after = re.match(r"[a-z' -]*", text[match.end():], re.I).group(0)  # up to the next punctuation
+        words = [_prop_key(w) for w in after.split()[:5]]
+        for i, word in enumerate(words):
+            pair = f"{word} {words[i + 1]}" if i + 1 < len(words) else ""
+            name = pair if pair in PROP_EMOJI else word if word in PROP_EMOJI else ""
+            if name:
+                if name not in found:
+                    found.append(name)
+                break
+    return found
+
+
+def choose_props(planned: list[str], text: str = "", skip=lambda prop: False) -> list[dict]:
+    """The props to show beside the hero: first what the page text says the hero holds or uses,
+    then the plan's props the text mentions, then the rest of the plan's. Props that `skip` (worn,
+    or part of the hero's own description) are never shown. At most 2, each with an emoji."""
+    in_text = {_prop_key(w) for w in (text or "").split()}
+    mentioned = [p for p in planned if p.split() and _prop_key(p.split()[-1]) in in_text]
+    ordered = held_in_text(text) + mentioned + [p for p in planned if p not in mentioned]
+    out: list[dict] = []
+    for prop in ordered:
+        if skip(prop):
+            continue
+        for item in prop_emoji([prop]):
+            if item["emoji"] not in {x["emoji"] for x in out}:
+                out.append(item)
+        if len(out) == 2:
+            break
     return out
 
 

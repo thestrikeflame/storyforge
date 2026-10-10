@@ -625,6 +625,7 @@
   }
 
   let shownPicture = null;
+  let shownProps = "";
   const heroAnimator = window.HeroAnimator
     ? window.HeroAnimator.create($("picture"), { fx: $("hero-fx"), noise: document.getElementById("line-boil-noise") })
     : null;
@@ -645,8 +646,17 @@
     $("picture-meter-fill").style.transform = `scaleX(${status === "generating" ? image.progress || 0.02 : 0})`;
     $("picture-meter").setAttribute("aria-valuenow", String(Math.round((image.progress || 0) * 100)));
 
-    const key = `${state.story.id}:${page.index}:${page.status}:${status}:${image.url || ""}:${state.story.heroUrl}:${page.hero_action || ""}:${(page.props || []).map((p) => p.emoji).join("")}`;
-    if (key === shownPicture) return;
+    // Props can change once the text is finished (it says what the hero holds): swap them in place
+    // without restarting the hero's action. (page.status is not in the key for the same reason.)
+    const props = (page.props || []).map((p) => p.emoji).join("");
+    const key = `${state.story.id}:${page.index}:${page.status === "failed"}:${status}:${image.url || ""}:${state.story.heroUrl}:${page.hero_action || ""}`;
+    if (key === shownPicture) {
+      if (props !== shownProps && heroAnimator && figure.dataset.state === "completed") {
+        shownProps = props;
+        heroAnimator.props(page.props || []);
+      }
+      return;
+    }
     shownPicture = key;
 
     const img = $("picture-img");
@@ -663,6 +673,7 @@
         // The background is scenery only; the same hero stands in every scene.
         if (hero.getAttribute("src") !== state.story.heroUrl) hero.src = state.story.heroUrl;
         figure.dataset.state = "completed";
+        shownProps = (page.props || []).map((p) => p.emoji).join("");
         if (heroAnimator) heroAnimator.set(page.hero_action || "standing", page.props || []);
       };
       loader.onerror = () => {

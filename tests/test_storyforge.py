@@ -231,6 +231,8 @@ class Parsing(unittest.TestCase):
         self.assertIn('heroAnimator.set(page.hero_action || "standing", page.props || [])',
                       (ROOT / "static" / "app.js").read_text())
         self.assertIn(".hero-prop {", css)
+        self.assertIn("props: showProps", hero_js)  # swapped in place when the text names what the hero holds
+        self.assertIn("heroAnimator.props(page.props || [])", (ROOT / "static" / "app.js").read_text())
         # whenever the hero turns around, its props' emoji turn back the same way at the same time
         import re as regex2
         flips = regex2.findall(r'\[data-action="(\w+)"\] \.hero-flip \{ animation: (face [^;]+); \}', css)
@@ -425,6 +427,27 @@ class Parsing(unittest.TestCase):
         self.assertIn("a field by the sea, a striped windmill, pink clouds, ", prompt)  # "pink" is only a colour
         self.assertNotIn("strawberr", prompt)
         self.assertNotIn("shell", prompt)
+
+    def test_props_are_what_the_hero_holds_never_what_it_wears(self):
+        from storyforge.images import hero_words, worn_or_about_the_hero
+        from storyforge.llm import choose_props, held_in_text
+        text = ("Cowboy Bill tipped his hat and unfolded his old treasure map. He held the map up to the sun. "
+                "Then Mira waved her magic wand and ate an apple. She opened the door.")
+        self.assertEqual(held_in_text(text), ["map", "magic wand", "apple"])  # "the door": no emoji, not a prop
+        story = {"hero_name": "Cowboy Bill", "hero_description": "a stick figure with a brown cowboy hat and a red scarf"}
+        hero = hero_words(story)
+        skip = lambda prop: worn_or_about_the_hero(prop, hero)
+        for worn in ("a cowboy hat", "red scarf", "his boots", "round glasses", "a sparkly crown"):
+            self.assertTrue(skip(worn), worn)
+        self.assertFalse(skip("a magic wand"))  # held, not worn
+        # the plan said hat and lasso; the text says he holds the map: the map first, the hat never
+        self.assertEqual(choose_props(["a cowboy hat", "a kite"], "Bill tipped his hat and held the map.", skip),
+                         [{"name": "map", "emoji": "🗺️"}, {"name": "a kite", "emoji": "🪁"}])
+        # the plan's props the text mentions come before the others
+        self.assertEqual(choose_props(["a kite", "a red apple"], "The apple was shiny.", skip)[0]["emoji"], "🍎")
+        # before the text exists, the plan's props (minus anything worn)
+        self.assertEqual(choose_props(["glasses", "a ripe strawberry"], "", skip),
+                         [{"name": "a ripe strawberry", "emoji": "🍓"}])
 
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages

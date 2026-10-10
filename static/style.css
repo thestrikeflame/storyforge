@@ -405,13 +405,14 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
 .hero-breath { position: relative; }
 .hero-props { position: absolute; inset: 0; pointer-events: none; }
 .hero-prop {
-  position: absolute; bottom: 30%;
-  font-size: 15cqw; line-height: 1;
+  position: absolute; bottom: 34%;
+  font-size: 13cqw; line-height: 1;
   filter: drop-shadow(0 .4cqw .5cqw rgba(44, 35, 64, .45));
   animation: prop-in .5s var(--ease) 1.1s both;
 }
-.hero-prop:nth-child(1) { left: 100%; translate: -35% 0; rotate: 10deg; }
-.hero-prop:nth-child(2) { right: 100%; translate: 35% 0; rotate: -10deg; }
+/* Overlapping the drawing's edge, where a hand usually is, as if held. */
+.hero-prop:nth-child(1) { left: 100%; translate: -70% 0; rotate: 10deg; }
+.hero-prop:nth-child(2) { right: 100%; translate: 70% 0; rotate: -10deg; }
 /* The emoji itself turns with the hero (same "face" animation as .hero-flip, per action below), which
    cancels the flip: it stays beside the same hand but never shows mirrored. */
 .hero-prop-face { display: inline-block; }
