@@ -101,6 +101,8 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
             seg["setting"] = plan["setting"]
             seg["visual_details"] = plan["visual_details"]
             seg["hero_action"] = plan["action"]
+            seg["prop_names"] = plan["props"]
+            seg["props"] = llm.prop_emoji(plan["props"])
             if settings.image_mode == "huggingface":
                 worker.enqueue(story, seg)
     if seg["text_complete"]:
@@ -272,6 +274,9 @@ async def write_segment(story: dict, seg: dict) -> None:
         seg["visual_details"] = page.visual_details
     if not seg.get("hero_action"):
         seg["hero_action"] = page.hero_action
+    if not seg.get("prop_names") and page.props:
+        seg["prop_names"] = page.props
+        seg["props"] = llm.prop_emoji(page.props)
     seg["choices"] = page.choices
     seg["error"] = None
     seg["status"] = "ready"

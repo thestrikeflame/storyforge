@@ -80,10 +80,12 @@ def build_reply(user_text: str, event: str | None = None) -> dict:
     if number == 1:
         reply["setting"] = "a cosy village bakery kitchen at dawn"
         reply["visual_details"] = ["a warm brick oven", "flour on the wooden table", "morning sun through the window"]
+        reply["props"] = ["a ripe strawberry", "glimmering zorb"]  # the second has no emoji
         reply["action"] = "waving"
     else:
         reply["setting"] = f"a sunny sandy beach beside a red lighthouse, scene {number}"
         reply["visual_details"] = ["seashells in the sand", "a striped beach umbrella"]
+        reply["props"] = ["a seashell"]
         reply["action"] = "walking"
     if first and '"hero_name"' in user_text:
         reply["hero_name"] = "Captain Whiskers"

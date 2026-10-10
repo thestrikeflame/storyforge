@@ -645,7 +645,7 @@
     $("picture-meter-fill").style.transform = `scaleX(${status === "generating" ? image.progress || 0.02 : 0})`;
     $("picture-meter").setAttribute("aria-valuenow", String(Math.round((image.progress || 0) * 100)));
 
-    const key = `${state.story.id}:${page.index}:${page.status}:${status}:${image.url || ""}:${state.story.heroUrl}:${page.hero_action || ""}`;
+    const key = `${state.story.id}:${page.index}:${page.status}:${status}:${image.url || ""}:${state.story.heroUrl}:${page.hero_action || ""}:${(page.props || []).map((p) => p.emoji).join("")}`;
     if (key === shownPicture) return;
     shownPicture = key;
 
@@ -663,7 +663,7 @@
         // The background is scenery only; the same hero stands in every scene.
         if (hero.getAttribute("src") !== state.story.heroUrl) hero.src = state.story.heroUrl;
         figure.dataset.state = "completed";
-        if (heroAnimator) heroAnimator.set(page.hero_action || "standing");
+        if (heroAnimator) heroAnimator.set(page.hero_action || "standing", page.props || []);
       };
       loader.onerror = () => {
         page.pictureBroken = true;

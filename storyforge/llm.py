@@ -56,6 +56,8 @@ _PLAN_KEYS = (
     '"visual_details": a list of 2 or 3 concrete things visible in that place, each at most 6 words: '
     "scenery only: sky, weather, time of day, buildings, plants or ground. Never characters. The page "
     "must happen in this place and mention every one of these details.\n"
+    '"props": a list of 0 to 2 small objects the hero holds or uses on this page, each 1 or 2 words. '
+    "The page must mention them. [] when there are none.\n"
     f'"action": what the hero is doing on this page, exactly one of: {", ".join(HERO_ACTIONS)}.\n'
 )
 _COMMON_KEYS = (
@@ -352,6 +354,7 @@ def response_schema(first: bool, final: bool, drawn_hero: bool = False, event: s
         props["title"] = {"type": "string"}
     props["setting"] = {"type": "string"}
     props["visual_details"] = {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 3}
+    props["props"] = {"type": "array", "items": {"type": "string"}, "minItems": 0, "maxItems": 2}
     props["action"] = {"type": "string", "enum": list(HERO_ACTIONS)}
     if first and drawn_hero:
         props["hero_name"] = {"type": "string"}
@@ -616,6 +619,72 @@ def clean_details(value) -> list[str]:
     return out[:3]
 
 
+# Small things the hero holds or uses, shown as a big emoji beside the drawing. Only gentle,
+# everyday objects: a prop with no match here (or a weapon) is simply not shown.
+PROP_EMOJI = {
+    "strawberry": "🍓", "apple": "🍎", "banana": "🍌", "cherry": "🍒", "grape": "🍇", "orange": "🍊",
+    "lemon": "🍋", "pear": "🍐", "peach": "🍑", "watermelon": "🍉", "carrot": "🥕", "mushroom": "🍄",
+    "bread": "🍞", "cake": "🍰", "cupcake": "🧁", "cookie": "🍪", "biscuit": "🍪", "pie": "🥧", "honey": "🍯",
+    "candy": "🍬", "sweet": "🍬", "lollipop": "🍭", "chocolate": "🍫", "ice cream": "🍦", "pizza": "🍕",
+    "sandwich": "🥪", "cheese": "🧀", "egg": "🥚", "milk": "🥛", "tea": "🍵", "cup": "☕", "teacup": "☕",
+    "acorn": "🌰", "nut": "🌰", "flower": "🌸", "rose": "🌹", "sunflower": "🌻", "tulip": "🌷", "daisy": "🌼",
+    "leaf": "🍃", "clover": "🍀", "seashell": "🐚", "shell": "🐚", "feather": "🪶", "star": "⭐",
+    "crystal": "💎", "gem": "💎", "jewel": "💎", "diamond": "💎", "pearl": "🦪", "rock": "🪨", "stone": "🪨",
+    "pebble": "🪨", "key": "🔑", "map": "🗺️", "book": "📖", "storybook": "📖", "letter": "✉️", "note": "📝",
+    "scroll": "📜", "pencil": "✏️", "crayon": "🖍️", "paintbrush": "🖌️", "brush": "🖌️", "paint": "🎨",
+    "ball": "⚽", "balloon": "🎈", "kite": "🪁", "teddy": "🧸", "teddy bear": "🧸", "toy": "🧸", "gift": "🎁",
+    "present": "🎁", "box": "📦", "basket": "🧺", "bucket": "🪣", "umbrella": "☂️", "lantern": "🏮",
+    "lamp": "🪔", "candle": "🕯️", "torch": "🔦", "flashlight": "🔦", "magnifying glass": "🔍",
+    "telescope": "🔭", "compass": "🧭", "bell": "🔔", "drum": "🥁", "guitar": "🎸", "violin": "🎻",
+    "trumpet": "🎺", "flute": "🪈", "wand": "🪄", "magic wand": "🪄", "crown": "👑", "hat": "🎩",
+    "ribbon": "🎀", "bow": "🎀", "rope": "🪢", "fishing rod": "🎣", "shovel": "🪏",
+    "spade": "🪏", "watering can": "🪣", "magnet": "🧲", "clock": "⏰", "camera": "📷", "phone": "📱",
+    "jar": "🫙", "potion": "🧪", "trophy": "🏆", "medal": "🏅", "coin": "🪙", "coins": "🪙",
+    "snowball": "❄️", "snowflake": "❄️", "bubble": "🫧", "heart": "❤️", "rainbow": "🌈",
+}
+
+
+def _prop_key(word: str) -> str:
+    """Lower case, no punctuation, singular: "Strawberries" -> "strawberry", "boxes" -> "box"."""
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if w in PROP_EMOJI:
+        return w
+    for suffix, repl in (("ies", "y"), ("ves", "f"), ("es", ""), ("s", "")):
+        if w.endswith(suffix) and w[: -len(suffix)] + repl in PROP_EMOJI:
+            return w[: -len(suffix)] + repl
+    return w
+
+
+def prop_emoji(props: list[str]) -> list[dict]:
+    """The emoji for each prop, matched on its last words first ("a ripe strawberry" -> 🍓, "ice
+    cream cone" -> 🍦). Props with no match are skipped."""
+    out = []
+    for prop in props[:2]:
+        words = [_prop_key(w) for w in prop.split()]
+        emoji = None
+        for i in range(len(words) - 1, -1, -1):
+            pair = " ".join(words[i - 1 : i + 1]) if i else ""
+            emoji = PROP_EMOJI.get(pair) or PROP_EMOJI.get(words[i])
+            if emoji:
+                break
+        if emoji:
+            out.append({"name": prop, "emoji": emoji})
+    return out
+
+
+def clean_props(value) -> list[str]:
+    """Up to 2 short props, never a weapon (those are left out, not swapped for something else)."""
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            item = clean_line(item, 40).rstrip(".")
+            if len(item) > 1 and not _WEAPON.search(item) and item.lower() not in {x.lower() for x in out}:
+                out.append(item)
+    return out[:2]
+
+
 def clean_action(value) -> str:
     value = value.strip().lower() if isinstance(value, str) else ""
     return value if value in HERO_ACTIONS else HERO_ACTIONS[0]
@@ -623,15 +692,17 @@ def clean_action(value) -> str:
 
 def extract_plan(raw: str) -> dict | None:
     """The page plan, once all of it has streamed in (it comes before the page text):
-    {"setting", "visual_details", "action"}. None until then."""
+    {"setting", "visual_details", "props", "action"}. None until then."""
     setting, setting_done = extract_string_field(raw, "setting")
     details = _string_list(raw, "visual_details")
+    props = _string_list(raw, "props")
     action, action_done = extract_string_field(raw, "action")
     if not (setting_done and setting and details is not None and action_done):
         return None
     return {
         "setting": clean_line(setting, 180),
         "visual_details": clean_details(details),
+        "props": clean_props(props or []),
         "action": clean_action(action),
     }
 
@@ -699,6 +770,7 @@ class Page:
     setting: str = ""
     hero_name: str = ""
     visual_details: list[str] = field(default_factory=list)
+    props: list[str] = field(default_factory=list)
     hero_action: str = HERO_ACTIONS[0]
     used_fallback_choices: bool = False
     repaired: bool = False
@@ -720,6 +792,9 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
         details = _string_list(raw, "visual_details")
         if details:
             data["visual_details"] = details
+        props = _string_list(raw, "props")
+        if props:
+            data["props"] = props
         block = re.search(r'"choices"\s*:\s*\[(.*?)(\]|$)', raw, re.S)
         if block:
             data["choices"] = re.findall(r'"((?:[^"\\]|\\.)*)"', block.group(1))
@@ -776,6 +851,7 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
         setting=line("setting", 180),
         hero_name=line("hero_name", 40) if first else "",
         visual_details=clean_details(data.get("visual_details")),
+        props=clean_props(data.get("props")),
         hero_action=clean_action(data.get("action")),
         used_fallback_choices=used_fallback,
         repaired=repaired,

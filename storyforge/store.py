@@ -43,6 +43,8 @@ def new_segment(index: int, action: str | None, kind: str) -> dict:
         "setting": "",  # the page plan: where it happens; the background is painted from it
         "visual_details": [],  # ...2-3 things visible there (never characters)
         "hero_action": "",  # ...and what the hero is doing (for animating the hero layer)
+        "prop_names": [],  # ...up to 2 small things the hero holds or uses (never in the background)
+        "props": [],  # ...those that have an emoji, [{"name", "emoji"}], shown beside the hero
         "choices": [],
         "action": action,  # the reader's decision that led to this page
         "kind": kind,  # opening | choice | custom | continue | finish
@@ -169,6 +171,7 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
         "action": seg.get("action"),
         "final": bool(seg.get("final")),
         "hero_action": seg.get("hero_action") or "",
+        "props": seg.get("props") or [],
         "error": seg.get("error"),
         "image": {
             "status": image["status"],

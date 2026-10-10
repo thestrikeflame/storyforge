@@ -187,9 +187,9 @@ class Parsing(unittest.TestCase):
 
     def test_page_plan_comes_first_and_is_parsed(self):
         from storyforge.llm import HERO_ACTIONS, SYSTEM_PROMPT, build_messages, parse_page, response_schema
-        plan = ["setting", "visual_details", "action"]
-        self.assertEqual(list(response_schema(False, False)["properties"])[:4], plan + ["segment"])
-        self.assertEqual(list(response_schema(True, False)["properties"])[:5], ["title"] + plan + ["segment"])
+        plan = ["setting", "visual_details", "props", "action"]
+        self.assertEqual(list(response_schema(False, False)["properties"])[:5], plan + ["segment"])
+        self.assertEqual(list(response_schema(True, False)["properties"])[:6], ["title"] + plan + ["segment"])
         self.assertEqual(response_schema(False, False)["properties"]["action"]["enum"], list(HERO_ACTIONS))
         story = {"premise": "p", "segments": []}
         text = build_messages(story, None, False)[1]["content"]
@@ -224,6 +224,13 @@ class Parsing(unittest.TestCase):
         page = (ROOT / "static" / "index.html").read_text()
         for needle in ('id="line-boil-noise"', "feDisplacementMap", 'src="/static/hero.js"', 'class="hero-shadow"', 'id="hero-fx"'):
             self.assertIn(needle, page)
+        # props sit inside the hero's layers, so they move and breathe with it
+        breath = page[page.index('<div class="hero-breath">'):]
+        self.assertLess(breath.index('class="hero-props"'), breath.index("</div>"))
+        self.assertIn("set(next, props = [])", hero_js)
+        self.assertIn('heroAnimator.set(page.hero_action || "standing", page.props || [])',
+                      (ROOT / "static" / "app.js").read_text())
+        self.assertIn(".hero-prop {", css)
 
     def test_no_weapon_words_unless_the_drawing_has_one(self):
         from storyforge import vision
@@ -293,7 +300,8 @@ class Parsing(unittest.TestCase):
         self.assertIsNone(extract_plan(full[: full.index('"action"')]))
         self.assertIsNone(extract_plan(full[: full.index('flying') + 3]))
         self.assertEqual(extract_plan(full), {"setting": "a space station window",
-                                              "visual_details": ["a blue planet", "tiny stars"], "action": "flying"})
+                                              "visual_details": ["a blue planet", "tiny stars"], "props": [],
+                                              "action": "flying"})
 
     def test_preset_matches_the_place(self):
         from pathlib import Path as P
@@ -383,6 +391,33 @@ class Parsing(unittest.TestCase):
         self.assertEqual(shown("Mira knocked.\n\nA warm light flickered under the old wooden door. She"), "Mira knocked.")
         # with nothing earlier (page 1), still only finished sentences
         self.assertEqual(drop_repeats("One. Two thr", [], finished_only=True)[0], "One.")
+
+    def test_props_become_emoji_and_stay_out_of_the_background(self):
+        from storyforge.images import ImageWorker
+        from storyforge.llm import clean_props, extract_plan, prop_emoji, response_schema
+        self.assertEqual(prop_emoji(["a ripe strawberry", "Seashells"]),
+                         [{"name": "a ripe strawberry", "emoji": "🍓"}, {"name": "Seashells", "emoji": "🐚"}])
+        self.assertEqual(prop_emoji(["ice cream cone", "glimmering zorb"]), [{"name": "ice cream cone", "emoji": "🍦"}])
+        self.assertEqual(prop_emoji(["a teddy bear", "golden keys", "a kite"]),  # two at most
+                         [{"name": "a teddy bear", "emoji": "🧸"}, {"name": "golden keys", "emoji": "🔑"}])
+        self.assertEqual(clean_props(["a sword", "a shiny key.", "A shiny key", "x", "a kite", "a ball"]),
+                         ["a shiny key", "a kite"])  # no weapons, no repeats, two at most
+        self.assertEqual(clean_props("a kite"), [])
+        # in the plan, before the action, so they are known when the background starts
+        schema = response_schema(False, False)["properties"]
+        self.assertEqual(schema["props"], {"type": "array", "items": {"type": "string"}, "minItems": 0, "maxItems": 2})
+        self.assertLess(list(schema).index("props"), list(schema).index("action"))
+        raw = ('{"setting": "a sunny beach", "visual_details": ["soft waves", "a sandcastle"], '
+               '"props": ["a pink seashell"], "action": "walking", "segment": "Mi')
+        self.assertEqual(extract_plan(raw)["props"], ["a pink seashell"])
+        self.assertEqual(extract_plan(raw.replace('"props": ["a pink seashell"], ', ""))["props"], [])  # optional
+        # never painted: not in the place, and a detail with one is dropped
+        prompt = ImageWorker.build_background_prompt({}, {
+            "setting": "a strawberry field by the sea", "prop_names": ["a ripe strawberry", "a pink seashell"],
+            "visual_details": ["seashells in the sand", "a striped windmill", "pink clouds"]})
+        self.assertIn("a field by the sea, a striped windmill, pink clouds, ", prompt)  # "pink" is only a colour
+        self.assertNotIn("strawberr", prompt)
+        self.assertNotIn("shell", prompt)
 
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
@@ -739,10 +774,12 @@ class CloudBackgrounds(unittest.TestCase):
         self.assertIn("a cosy village bakery kitchen at dawn, a warm brick oven, flour on the wooden table", state["last_prompt"])
         self.assertIn("no characters", state["last_prompt"])
         self.assertNotIn("dragon", state["last_prompt"])  # the hero is drawn by the child, never painted
+        self.assertNotIn("strawberr", state["last_prompt"])  # nor what it holds
         page = wait_image(story_id, 0, CLOUD)
         self.assertEqual(page["image"]["status"], "completed")
         self.assertIn("bakery kitchen", page["image"]["alt"])
         self.assertEqual(page["hero_action"], "waving")
+        self.assertEqual(page["props"], [{"name": "a ripe strawberry", "emoji": "🍓"}])  # "glimmering zorb": no emoji
         status, png = call("GET", CLOUD + page["image"]["url"])
         self.assertEqual((status, png[:8]), (200, b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(self.sd_rows(story_id), [])  # nothing painted on the Jetson

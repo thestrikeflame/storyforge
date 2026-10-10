@@ -476,10 +476,12 @@ class ImageWorker:
 
         SD 1.5 only reads about 75 tokens (roughly 50 words) and pays most attention to the
         beginning. The style goes first so it can never be cut off, and the place is capped."""
-        hero = hero_words(story)
+        # The hero's props are shown as emoji beside the drawing; painted, they'd be giant objects.
+        hero = hero_words(story) | {_word_key(w) for prop in seg.get("prop_names") or [] for w in prop.split()
+                                    if _word_key(w) not in _LOOK_FILLER}
         place = without_words(without_characters(seg.get("setting") or story.get("world") or ""), hero)
         place = place or "a storybook landscape"
-        # A detail that names a character, the hero or something worn or held is dropped whole
+        # A detail that names a character, the hero, a prop or something worn or held is dropped whole
         # ("a sleepy cat", "a cowboy hat" are not scenery).
         details = [d.strip().rstrip(".") for d in seg.get("visual_details") or []
                    if d.strip() and is_scenery(d, hero)]

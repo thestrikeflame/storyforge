@@ -4,6 +4,8 @@
        action plays once (twice for walking and flying), then only gentle breathing is left,
      - re-seeds the SVG "line boil" filter about 4 times per second, so the drawing wobbles like
        hand-drawn animation,
+     - shows the page's props (up to 2 small things the hero holds) as big emoji beside it, inside
+       the hero's layers so they move with it,
      - and spawns the matching particles (dust puffs, sparkles, bubbles and zzz) while the action
        plays, stopping when it ends.
    With "reduce motion" on, the hero simply stands still: no boil, no particles, no movement. */
@@ -108,15 +110,30 @@
       });
     }
 
+    function showProps(props) {
+      const box = figure.querySelector(".hero-props");
+      if (!box) return;
+      box.textContent = "";
+      for (const prop of (props || []).slice(0, 2)) {
+        if (!prop || !prop.emoji) continue;
+        const el = document.createElement("span");
+        el.className = "hero-prop";
+        el.textContent = prop.emoji;
+        box.appendChild(el);
+      }
+    }
+
     function refresh() {
       boil();
       particles();
     }
 
     return {
-      // Play this page's action once the hero has faded in. The same action on a new page plays again.
-      set(next) {
+      // Play this page's action once the hero has faded in, holding the page's props ([{name, emoji}]).
+      // The same action on a new page plays again.
+      set(next, props = []) {
         const mine = ++run;
+        showProps(props);
         clearTimeout(startTimer);
         action = null;
         acting = false;
@@ -140,6 +157,7 @@
         action = null;
         acting = false;
         figure.removeAttribute("data-action");
+        showProps([]);
         refresh();
       },
       init() {

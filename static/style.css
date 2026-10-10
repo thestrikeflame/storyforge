@@ -383,6 +383,7 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
      .hero-act     the action itself (jump, rock, wobble, spin, tip over, hide...)
      .hero-breath  barely visible breathing, always on
      img.hero      the drawing, with the SVG "line boil" filter (re-seeded by hero.js)
+     .hero-props   up to 2 big emoji the hero holds (hero.js), beside its hands, moving with it
    Distances use cqw (the frame is square), so the hero moves the same at every size. */
 .picture { container-type: inline-size; }
 .hero-stage {
@@ -401,6 +402,17 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
   height: 100%; width: auto; max-width: 70cqw; object-fit: contain;
   opacity: 1; animation: none; user-select: none; -webkit-user-drag: none;
 }
+.hero-breath { position: relative; }
+.hero-props { position: absolute; inset: 0; pointer-events: none; }
+.hero-prop {
+  position: absolute; bottom: 30%;
+  font-size: 15cqw; line-height: 1;
+  filter: drop-shadow(0 .4cqw .5cqw rgba(44, 35, 64, .45));
+  animation: prop-in .5s var(--ease) 1.1s both;
+}
+.hero-prop:nth-child(1) { left: 100%; translate: -35% 0; rotate: 10deg; }
+.hero-prop:nth-child(2) { right: 100%; translate: 35% 0; rotate: -10deg; }
+@keyframes prop-in { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: none; } }
 .hero-shadow {
   position: absolute; left: 50%; bottom: -5%; width: 96%; height: 12%;
   transform: translateX(-50%);

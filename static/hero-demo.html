@@ -36,6 +36,7 @@
           <span class="hero-shadow"></span>
           <div class="hero-flip"><div class="hero-act"><div class="hero-breath">
             <img class="hero" alt="" draggable="false">
+            <div class="hero-props"></div>
           </div></div></div>
         </div>
       </div>
@@ -47,6 +48,8 @@
 <script src="/static/hero.js"></script>
 <script>
   (() => {
+    // A few tiles hold props, as a page's plan can give the hero.
+    const props = { waving: ["🍓"], walking: ["🏮"], swimming: ["🐚"], cheering: ["🎈", "⭐"], dancing: ["🎀"] };
     const backgrounds = { swimming: "underwater", flying: "space", sleeping: "village", hiding: "castle", running: "beach", walking: "village" };
     const hero = new URLSearchParams(location.search).get("hero") || "/static/art/hero-placeholder.png";
     const noise = document.getElementById("line-boil-noise");
@@ -63,8 +66,9 @@
         fx: tile.querySelector(".hero-fx"), noise: i === 0 ? noise : null,
       });
       animator.init();
-      animator.set(action);
-      tile.addEventListener("click", () => animator.set(action));
+      const held = (props[action] || []).map((emoji) => ({ name: "", emoji }));
+      animator.set(action, held);
+      tile.addEventListener("click", () => animator.set(action, held));
     });
   })();
 </script>
