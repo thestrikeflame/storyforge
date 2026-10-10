@@ -12,6 +12,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from urllib.parse import urlparse
 
 from .config import settings
@@ -34,7 +35,7 @@ SYSTEM_PROMPT = (
     "together with a reader. Unless the reader's idea clearly asks for an older audience, "
     "write for children aged 5 to 10: warm, vivid, simple sentences, never frightening or violent. "
     "Keep it gentle: nobody is hurt, attacked or fought. "
-    "Each page has at least {min_words} and at most {max_words} words, in two or three short "
+    "Each page has at least {min_words} and at most {max_words} words, in one or two short "
     "paragraphs, told in the past tense. Keep names, looks and places consistent with what came before. "
     "Never wrap up the whole story unless you are told it is the last page. "
     "Reply with one JSON object only, no other text."
@@ -168,9 +169,48 @@ def short_summary(summary: str) -> str:
     return " ".join(sentences[:2]).strip()
 
 
-def last_sentence(text: str) -> str:
-    sentences = [s for s in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s]
-    return sentences[-1][:240] if sentences else ""
+# A sentence ends at . ! or ? (maybe followed by a closing quote) and then a space.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+|(?<=[.!?][\"'\u201d\u2019])\s+")
+
+
+def _sentence_words(sentence: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", sentence.lower().replace("\u2019", "'"))
+
+
+def _repeats(words: list[str], earlier: list[list[str]]) -> bool:
+    """Mostly the same as an earlier sentence: 75% alike overall, or 80% of it found inside a
+    longer one. Very short sentences ("Mira smiled.") may come back, so they are kept."""
+    if len(words) < 5:
+        return False
+    for other in earlier:
+        match = SequenceMatcher(None, words, other, autojunk=False)
+        if match.ratio() >= 0.75 or sum(b.size for b in match.get_matching_blocks()) >= 0.8 * len(words):
+            return True
+    return False
+
+
+def drop_repeats(text: str, earlier_pages: list[str]) -> tuple[str, int]:
+    """Drop every finished sentence that is mostly the same as one on an earlier page (the small
+    model likes to start a page by retelling how the last one ended). Paragraphs are kept; an
+    unfinished last sentence (still streaming) is left alone. Returns (text, sentences dropped)."""
+    earlier = [_sentence_words(x) for page in earlier_pages for x in _SENTENCE_END.split(page or "")]
+    earlier = [w for w in earlier if w]
+    if not earlier or not text:
+        return text, 0
+    dropped = 0
+    paragraphs = []
+    for paragraph in text.split("\n\n"):
+        pieces = _SENTENCE_END.split(paragraph.strip())
+        kept = []
+        for i, piece in enumerate(pieces):
+            finished = i < len(pieces) - 1 or re.search(r"[.!?][\"'\u201d\u2019]?$", piece)
+            if finished and _repeats(_sentence_words(piece), earlier):
+                dropped += 1
+            else:
+                kept.append(piece)
+        if any(k.strip() for k in kept):
+            paragraphs.append(" ".join(kept))
+    return "\n\n".join(paragraphs), dropped
 
 
 def hero_notes(description: str) -> tuple[str, list[str]]:
@@ -234,16 +274,15 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             + _PLAN_KEYS
             + ('"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n' if hero else "") +
             '"segment": the text of page 1, written from the plan above: '
-            f'{settings.segment_min_words} to {settings.segment_max_words} words in two or three paragraphs.\n'
+            f'{settings.segment_min_words} to {settings.segment_max_words} words in one or two short paragraphs.\n'
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
             '"world": the setting in at most 20 words.\n'
             + _COMMON_KEYS + _CHOICES_KEY + _SUMMARY_KEY
         )
     else:
-        # Only a short summary and the last sentence of the previous page: the full text would drown
-        # out the reader's choice, which a small model then ignores.
-        ended = last_sentence(ready[-1]["text"])
+        # Only a short summary: the previous page's text would drown out the reader's choice (which a
+        # small model then ignores), and its last sentence tempted it to retell how that page ended.
         if final:
             task = (
                 f"Write page {page_number}, the LAST page. Bring the story to a warm, satisfying "
@@ -273,8 +312,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             + (" (move somewhere new when the reader's choice goes somewhere)\n" if event
                else " (stay there or move somewhere new, as the story needs)\n")
             +
-            f"Story so far: {short_summary(story.get('summary')) or 'see below'}\n"
-            f"Where the last page ended: {ended}\n\n"
+            f"Story so far: {short_summary(story.get('summary')) or 'the story has just begun'}\n\n"
             f"The reader decided: \"{decision}\"\n\n"
             f"{task}\n\n"
             "Use these JSON keys in this order:\n"
@@ -284,7 +322,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
                f'The "action" is what the hero does in this event.\n' if event else "")
             + _PLAN_KEYS +
             f'"segment": the text of page {page_number}, written from the plan above: '
-            f'{settings.segment_min_words} to {settings.segment_max_words} words in two or three paragraphs.\n'
+            f'{settings.segment_min_words} to {settings.segment_max_words} words in one or two short paragraphs.\n'
             + _COMMON_KEYS + choices_key + _SUMMARY_KEY
             # Last, because a small model follows the last instruction best.
             + (f"\n\nThis page must show: {event}" if event else "")
@@ -625,10 +663,10 @@ def word_count(text: str) -> int:
     return len(text.split())
 
 
-def minimum_words(last_try: bool = False) -> int:
-    """Shortest page we accept. Lenient on purpose: a slightly short page beats a retry, and on the
-    last try a short page beats a failed one."""
-    return 25 if last_try else max(25, settings.segment_min_words // 2)
+def minimum_words() -> int:
+    """Shortest page we keep. Lenient on purpose: a slightly short page beats writing it again,
+    which the reader would see."""
+    return min(40, settings.segment_min_words)
 
 
 @dataclass
@@ -646,10 +684,12 @@ class Page:
     hero_action: str = HERO_ACTIONS[0]
     used_fallback_choices: bool = False
     repaired: bool = False
+    repeats_dropped: int = 0  # sentences left out because an earlier page already had them
 
 
-def parse_page(raw: str, first: bool, final: bool, last_try: bool = False) -> Page:
-    """Validate the model's reply. Raises WriterFailed when no usable page text exists."""
+def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | None = None) -> Page:
+    """Validate the model's reply. Raises WriterFailed when no usable page text exists.
+    Sentences repeated from `earlier_pages` are dropped before the length is checked."""
     data = _loads_lenient(raw)
     repaired = data is None
     if data is None:
@@ -669,8 +709,8 @@ def parse_page(raw: str, first: bool, final: bool, last_try: bool = False) -> Pa
     segment = data.get("segment") or data.get("story") or data.get("text") or ""
     if not isinstance(segment, str):
         segment = ""
-    segment = clean_text(segment, 1800)
-    if word_count(segment) < minimum_words(last_try):
+    segment, dropped = drop_repeats(clean_text(segment, 1800), earlier_pages or [])
+    if word_count(segment) < minimum_words():
         raise WriterFailed(f"page text too short ({word_count(segment)} words)")
     if segment.lstrip().startswith(("{", "[")) or '"visual_prompt"' in segment:
         raise WriterFailed("page text contains JSON")
@@ -720,4 +760,5 @@ def parse_page(raw: str, first: bool, final: bool, last_try: bool = False) -> Pa
         hero_action=clean_action(data.get("action")),
         used_fallback_choices=used_fallback,
         repaired=repaired,
+        repeats_dropped=dropped,
     )

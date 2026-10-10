@@ -166,8 +166,9 @@ class Parsing(unittest.TestCase):
             parse_page('{"segment": "Too short."}', True, False)
         thirty = json.dumps({"segment": " ".join(["word"] * 30) + "."})
         with self.assertRaises(WriterFailed):
-            parse_page(thirty, True, False)  # first try: ask again for a fuller page
-        self.assertEqual(len(parse_page(thirty, True, False, last_try=True).segment.split()), 30)  # last try: keep it
+            parse_page(thirty, True, False)  # under 40 words: not a usable page
+        forty_five = json.dumps({"segment": " ".join(["word"] * 45) + "."})
+        self.assertEqual(len(parse_page(forty_five, True, False).segment.split()), 45)  # short, but kept
         from storyforge.vision import clean_description
         self.assertEqual(clean_description("A smiling man wearing a hat, drawn in dark blue, with a big nose."),
                          "a smiling man wearing a hat, with a big nose")
@@ -338,6 +339,26 @@ class Parsing(unittest.TestCase):
             self.assertNotIn(word, prompt)
         self.assertLess(prompt.index(COMPOSITION), prompt.index("ranch"))  # part of the style, up front
 
+    def test_sentences_from_earlier_pages_are_dropped(self):
+        from storyforge.llm import drop_repeats, parse_page
+        earlier = ["Mira ran down the hill. A warm light flickered under the old wooden door.\n\nShe wondered what was inside."]
+        page = ("A warm light flickered under the old wooden door! Mira knocked twice and the door creaked open. "
+                "Mira smiled.\n\nInside, a warm light was flickering under the old wooden door.\n\nShe wondered what was inside.")
+        text, dropped = drop_repeats(page, earlier)
+        # nearly the same (one word or the ending changed), or the same: dropped; an empty paragraph goes too
+        self.assertEqual(text, "Mira knocked twice and the door creaked open. Mira smiled.")
+        self.assertEqual(dropped, 3)
+        # very short sentences may come back, and a sentence still streaming in is left alone
+        self.assertEqual(drop_repeats("Mira smiled. A warm light flickered under the old", ["Mira smiled."])[0],
+                         "Mira smiled. A warm light flickered under the old")
+        self.assertEqual(drop_repeats(page, []), (page, 0))
+        # parse_page drops them before checking the length
+        new = " ".join(f"Brand new sentence number {n} is here." for n in range(8))
+        reply = json.dumps({"segment": f"A warm light flickered under the old wooden door. {new}"})
+        parsed = parse_page(reply, False, False, earlier_pages=earlier)
+        self.assertTrue(parsed.segment.startswith("Brand new"))
+        self.assertEqual(parsed.repeats_dropped, 1)
+
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
         long_page = "word " * 400
@@ -402,8 +423,9 @@ class Flow(unittest.TestCase):
         sent = call("GET", f"{LLM}/state")[1]["last_user"]
         self.assertIn("Open the tiny wooden door", sent)       # the decision
         self.assertIn("Story so far: Mira", sent)               # a short summary
-        # only the last sentence of the previous page, not its full text
-        self.assertIn("Where the last page ended: A warm light flickered under it", sent)
+        # nothing of the previous page's text: it tempted the model to retell how that page ended
+        self.assertNotIn("Where the last page ended", sent)
+        self.assertNotIn("A warm light flickered under it", sent)
         self.assertNotIn("ten. The tenth mushroom", sent)
         self.assertTrue(sent.endswith("This page must show: Open the tiny wooden door"))  # the choice comes last
         schema = call("GET", f"{LLM}/state")[1]["last_schema"]
@@ -591,25 +613,26 @@ class Flow(unittest.TestCase):
         self.assertIn("--steps 8 ", rows[1])
         self.assertIn("classic", call("GET", f"{BASE}/api/health")[1]["pictures"]["mode"])
 
-    def test_14_the_choice_is_followed_retried_or_bridged(self):
+    def test_14_the_choice_is_followed_or_bridged(self):
         story_id = new_story()
         wait_ready(story_id, 0)
         log_file = TMP / "logs" / "storyforge.log"
-        # ignored once: the page is written again and then follows the choice
-        call("POST", f"{LLM}/control", {"ignore_choice": 1})
-        before = call("GET", f"{LLM}/state")[1]["requests"]
+        # followed: nothing added
         call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "choice", "action": "Knock and wait politely", "after": 0})
         page = wait_ready(story_id, 1)
-        self.assertEqual(call("GET", f"{LLM}/state")[1]["requests"] - before, 2)
         self.assertTrue(page["text"].startswith("Mira chose to knock and wait politely."), page["text"][:80])
         self.assertIn("choice='Knock and wait politely'", log_file.read_text())
-        self.assertIn("result=passed on retry", log_file.read_text())
-        # ignored twice: a bridge sentence carries the choice out (none of these words is on the fake's page)
-        call("POST", f"{LLM}/control", {"ignore_choice": 2})
+        self.assertIn("result=passed", log_file.read_text())
+        # ignored: never written again (the reader is watching it); a bridge sentence carries the choice
+        # out instead (none of these words is on the fake's page)
+        call("POST", f"{LLM}/control", {"ignore_choice": 1})
+        before = call("GET", f"{LLM}/state")[1]["requests"]
         call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "choice", "action": "Climb the tallest oak tree", "after": 1})
         page = wait_ready(story_id, 2)
+        self.assertEqual(call("GET", f"{LLM}/state")[1]["requests"] - before, 1)
         self.assertTrue(page["text"].startswith("So our hero decided to climb the tallest oak tree. "), page["text"][:80])
         self.assertIn("result=bridged", log_file.read_text())
+        self.assertRegex(log_file.read_text(), r"page check failed  story=\w+ page=3  check=choice  choice='Climb the tallest oak tree'")
         # a scary choice is made gentle before the storyteller sees it
         call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "custom", "action": "fight the dragon with a sword", "after": 2})
         page = wait_ready(story_id, 3)

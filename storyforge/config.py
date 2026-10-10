@@ -52,8 +52,8 @@ def _float(key: str, default: float, low: float, high: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     llm_url: str = _get("LLM_URL", "http://127.0.0.1:8080").rstrip("/")
-    segment_min_words: int = _int("SEGMENT_MIN_WORDS", 80, 30, 300)
-    segment_max_words: int = _int("SEGMENT_MAX_WORDS", 130, 40, 400)
+    segment_min_words: int = _int("SEGMENT_MIN_WORDS", 50, 30, 300)
+    segment_max_words: int = _int("SEGMENT_MAX_WORDS", 70, 40, 400)
     llm_max_tokens: int = _int("LLM_MAX_TOKENS", 420, 150, 1200)
     llm_temperature: float = _float("LLM_TEMPERATURE", 0.8, 0.0, 1.5)
     llm_timeout: int = _int("LLM_TIMEOUT_SECONDS", 180, 20, 900)

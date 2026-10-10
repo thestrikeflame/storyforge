@@ -44,6 +44,22 @@ ENDING = (
 )
 
 
+def extra_page(number: int) -> str:
+    """A page after the written ones. Each is different (and repeatable), since StoryForge drops
+    sentences an earlier page already had."""
+    import random
+    rng = random.Random(number)
+    who = ["Mira", "Pim", "The old owl", "A sleepy frog", "The tiny star", "A kind beetle"]
+    did = ["tiptoed past", "painted", "counted", "hummed beside", "polished", "climbed over", "peeked under", "carried"]
+    what = ["a mossy bridge", "seven blue pebbles", "a hollow log", "the singing reeds", "a basket of berries",
+            "a crooked signpost", "the silver puddle", "a pile of maple leaves", "a lantern made of glass", "a velvet curtain"]
+    how = ["very slowly", "with a giggle", "before the moon rose", "while the crickets sang", "on wobbly toes",
+           "as the breeze whistled", "without a single sound", "for the very first time"]
+    sentences = [f"{rng.choice(who)} {rng.choice(did)} {rng.choice(what)} {rng.choice(how)}, and {rng.choice(who).lower()} "
+                 f"{rng.choice(did)} {rng.choice(what)} {rng.choice(how)}." for _ in range(5)]
+    return " ".join(sentences[:3]) + "\n\n" + " ".join(sentences[3:])
+
+
 def build_reply(user_text: str, event: str | None = None) -> dict:
     final = "LAST page" in user_text
     first = "Write page 1 only" in user_text
@@ -68,7 +84,7 @@ def build_reply(user_text: str, event: str | None = None) -> dict:
         reply["action"] = "walking"
     if first and '"hero_name"' in user_text:
         reply["hero_name"] = "Captain Whiskers"
-    reply["segment"] = ENDING if final else PAGES[(number - 1) % len(PAGES)]
+    reply["segment"] = ENDING if final else PAGES[number - 1] if number <= len(PAGES) else extra_page(number)
     if event:
         if STATE["ignore_choice"] > 0:
             STATE["ignore_choice"] -= 1

@@ -86,13 +86,14 @@ app = FastAPI(title="StoryForge", lifespan=lifespan, docs_url=None, redoc_url=No
 # Writing a page
 # --------------------------------------------------------------------------
 
-def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: float, check: dict | None = None) -> None:
+def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: float, check: dict) -> None:
     """Copy the story text that has arrived so far into the page, and announce the moment
     the page text is complete so narration can start before the choices are even written.
     The page plan (setting, visual details, hero action) streams in first: in cloud mode the
     background starts painting as soon as the plan is complete.
-    With a reader's choice to `check`, the text only counts as complete (and narration only starts)
-    once it shows the choice; on the last try a bridge sentence carries the choice out instead."""
+    Sentences repeated from earlier pages (`check["earlier"]`) are left out as they stream. With a
+    reader's choice (`check["event"]`) that the finished page doesn't show, a bridge sentence is put
+    in front of it: the page is never written again, since the reader is already watching it."""
     if not seg.get("setting"):
         plan = llm.extract_plan(stream.raw)
         if plan:
@@ -106,14 +107,13 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
     text, complete = llm.extract_string_field(stream.raw, "segment")
     if not text:
         return
-    cleaned = llm.clean_text(text, 1800)
+    cleaned, dropped = llm.drop_repeats(llm.clean_text(text, 1800), check["earlier"])
     seg["partial"] = cleaned
     if complete and llm.word_count(cleaned) >= llm.minimum_words() and '"visual_prompt"' not in cleaned:
-        if check:
+        seg["repeats_dropped"] = dropped
+        if check["event"]:
             if llm.choice_followed(check["event"], cleaned, check["known"]):
-                seg["choice_check"] = "passed" if check["attempt"] == 1 else "passed on retry"
-            elif check["attempt"] == 1:
-                return  # not shown as finished: write_segment asks once more
+                seg["choice_check"] = "passed"
             else:
                 cleaned = f"{llm.bridge_sentence(check['event'], check['hero'])} {cleaned}"
                 seg["choice_check"] = "bridged"
@@ -146,12 +146,14 @@ async def write_segment(story: dict, seg: dict) -> None:
     # closes the prompt, and the page is checked for it.
     event = seg["action"] if seg["kind"] in ("choice", "custom") and seg["action"] else None
     known = story["segments"][seg["index"] - 1]["text"] if seg["index"] > 0 else ""
+    earlier = [s["text"] for s in story["segments"][: seg["index"]] if s.get("text")]
     try:
         async with llm_lock:
             if story.get("abandoned"):
                 return
+            # A second try only when the reply has no usable page at all (broken, or under 40 words).
             for attempt in (1, 2):
-                check = {"event": event, "known": known, "hero": story.get("hero_name"), "attempt": attempt} if event else None
+                check = {"event": event, "known": known, "hero": story.get("hero_name"), "earlier": earlier}
                 stream = llm.LLMStream(
                     messages=llm.build_messages(story, seg["action"], final, event=event),
                     schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description")), event=event),
@@ -181,17 +183,12 @@ async def write_segment(story: dict, seg: dict) -> None:
                         continue
                 _update_partial(story, seg, stream, started, check)
                 try:
-                    page = llm.parse_page(raw, first, final, last_try=attempt == 2)
-                    if event and not seg["text_complete"] and not llm.choice_followed(event, page.segment, known):
-                        if attempt == 1:
-                            log.warning("choice check  story=%s page=%d  missed %r; writing the page once more",
-                                        story["id"], seg["index"] + 1, event)
-                            seg["partial"] = ""
-                            seg["choice_check"] = "missed"
-                            page = None
-                            continue
-                        page.segment = f"{llm.bridge_sentence(event, story.get('hero_name'))} {page.segment}"
-                        seg["choice_check"] = "bridged"
+                    page = llm.parse_page(raw, first, final, earlier_pages=earlier)
+                    if not seg["text_complete"]:
+                        seg["repeats_dropped"] = page.repeats_dropped
+                        if event and not llm.choice_followed(event, page.segment, known):
+                            page.segment = f"{llm.bridge_sentence(event, story.get('hero_name'))} {page.segment}"
+                            seg["choice_check"] = "bridged"
                     break
                 except llm.WriterFailed as exc:
                     if seg["text_complete"]:
@@ -205,7 +202,9 @@ async def write_segment(story: dict, seg: dict) -> None:
                     if attempt == 2:
                         _fail(story, seg, "writer_failed", f"{exc}; reply began: {raw[:200]!r}")
                         return
-                    log.warning("page attempt %d unusable (%s); trying once more", attempt, exc)
+                    log.warning("page check failed  story=%s page=%d  check=unusable  attempt=%d  (%s)%s",
+                                story["id"], seg["index"] + 1, attempt, exc,
+                                "; writing it once more" if attempt == 1 else "")
                     seg["partial"] = ""
     except asyncio.CancelledError:
         if stream is not None:
@@ -252,10 +251,19 @@ async def write_segment(story: dict, seg: dict) -> None:
     if final:
         story["ended"] = True
 
+    # One line per failed check, all starting "page check failed", to see how often each happens.
+    where = f"story={story['id']} page={seg['index'] + 1}"
+    if seg.get("choice_check") == "bridged":
+        log.warning("page check failed  %s  check=choice  choice=%r  (bridge sentence added)", where, event)
+    if llm.word_count(seg["text"]) < settings.segment_min_words:
+        log.warning("page check failed  %s  check=length  words=%d of %d-%d  (kept)", where,
+                    llm.word_count(seg["text"]), settings.segment_min_words, settings.segment_max_words)
+    if seg.get("repeats_dropped"):
+        log.warning("page check failed  %s  check=repeat  sentences_dropped=%d", where, seg["repeats_dropped"])
     if event:
         log.info(
-            "choice check  story=%s page=%d  choice=%r  plan: setting=%r details=%s action=%s  result=%s",
-            story["id"], seg["index"] + 1, event, seg.get("setting"), seg.get("visual_details"),
+            "choice check  %s  choice=%r  plan: setting=%r details=%s action=%s  result=%s",
+            where, event, seg.get("setting"), seg.get("visual_details"),
             seg.get("hero_action"), seg.get("choice_check") or "passed",
         )
     total = round(time.monotonic() - started, 1)
