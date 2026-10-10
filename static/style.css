@@ -412,6 +412,9 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
 }
 .hero-prop:nth-child(1) { left: 100%; translate: -35% 0; rotate: 10deg; }
 .hero-prop:nth-child(2) { right: 100%; translate: 35% 0; rotate: -10deg; }
+/* The emoji itself turns with the hero (same "face" animation as .hero-flip, per action below), which
+   cancels the flip: it stays beside the same hand but never shows mirrored. */
+.hero-prop-face { display: inline-block; }
 @keyframes prop-in { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: none; } }
 .hero-shadow {
   position: absolute; left: 50%; bottom: -5%; width: 96%; height: 12%;
@@ -431,9 +434,11 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
    facing the way it goes. */
 .picture[data-action="walking"] .hero-move { animation: travel 7s ease-in-out 2; }
 .picture[data-action="walking"] .hero-flip { animation: face 7s 2; }
+.picture[data-action="walking"] .hero-prop-face { animation: face 7s 2; } /* counter-flip: emoji never mirrored */
 .picture[data-action="walking"] .hero-act { animation: waddle .7s ease-in-out 20; }
 .picture[data-action="running"] .hero-move { animation: travel 4.8s ease-in-out; }
 .picture[data-action="running"] .hero-flip { animation: face 4.8s; }
+.picture[data-action="running"] .hero-prop-face { animation: face 4.8s; } /* counter-flip: emoji never mirrored */
 .picture[data-action="running"] .hero-act { animation: run .32s ease-in-out 15; }
 @keyframes travel {
   0%, 100% { transform: translateX(0); } 25% { transform: translateX(26cqw); } 75% { transform: translateX(-26cqw); }
@@ -473,6 +478,7 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
    stays on the ground. */
 .picture[data-action="flying"] .hero-move { animation: fly 7s ease-in-out 2; }
 .picture[data-action="flying"] .hero-flip { animation: face 7s 2; }
+.picture[data-action="flying"] .hero-prop-face { animation: face 7s 2; } /* counter-flip: emoji never mirrored */
 .picture[data-action="flying"] .hero-act { animation: glide 1.75s ease-in-out 8; }
 .picture[data-action="flying"] .hero-shadow { animation: fly-shadow 7s ease-in-out 2; }
 @keyframes fly {
@@ -494,6 +500,7 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
 /* swimming: a slow, bobbing glide to each side and back (bubbles from hero.js). */
 .picture[data-action="swimming"] .hero-move { animation: travel 12s ease-in-out; }
 .picture[data-action="swimming"] .hero-flip { animation: face 12s; }
+.picture[data-action="swimming"] .hero-prop-face { animation: face 12s; } /* counter-flip: emoji never mirrored */
 .picture[data-action="swimming"] .hero-act { animation: bob 2.4s ease-in-out 5; }
 .picture[data-action="swimming"] .hero-shadow { opacity: .3; }
 @keyframes bob { 0%, 100% { transform: none; } 25% { transform: rotate(-3deg); } 75% { transform: translateY(-7%) rotate(3deg); } }

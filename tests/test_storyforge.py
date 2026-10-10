@@ -231,6 +231,13 @@ class Parsing(unittest.TestCase):
         self.assertIn('heroAnimator.set(page.hero_action || "standing", page.props || [])',
                       (ROOT / "static" / "app.js").read_text())
         self.assertIn(".hero-prop {", css)
+        # whenever the hero turns around, its props' emoji turn back the same way at the same time
+        import re as regex2
+        flips = regex2.findall(r'\[data-action="(\w+)"\] \.hero-flip \{ animation: (face [^;]+); \}', css)
+        counters = regex2.findall(r'\[data-action="(\w+)"\] \.hero-prop-face \{ animation: (face [^;]+); \}', css)
+        self.assertTrue(flips)
+        self.assertEqual(sorted(flips), sorted(counters))
+        self.assertIn('face.className = "hero-prop-face"', hero_js)
 
     def test_no_weapon_words_unless_the_drawing_has_one(self):
         from storyforge import vision

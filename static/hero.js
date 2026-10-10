@@ -118,7 +118,10 @@
         if (!prop || !prop.emoji) continue;
         const el = document.createElement("span");
         el.className = "hero-prop";
-        el.textContent = prop.emoji;
+        const face = document.createElement("span"); // counter-flipped in CSS, so the emoji never mirrors
+        face.className = "hero-prop-face";
+        face.textContent = prop.emoji;
+        el.appendChild(face);
         box.appendChild(el);
       }
     }
