@@ -49,6 +49,9 @@ from .sysinfo import log, memory_mb, timings
 IMAGE_MODES = ("huggingface", "local", "off")
 # Added to every background prompt; the hero is drawn by the child, never painted.
 NO_CHARACTERS = "scenery only, empty landscape, no people, no animals, no characters"
+# Added to the style. FLUX ignores "no ...", so the composition is asked for positively: without it a
+# hero's feature in the prompt ("a cowboy hat") can come out as one giant object in the middle.
+COMPOSITION = "wide establishing shot, open empty ground in the center foreground, no single large object in the middle"
 
 
 # Ready-made backgrounds (static/art/preset-<place>.jpg) and the words that point to each.
@@ -92,6 +95,53 @@ def without_characters(text: str) -> str:
     """Drop character words (and their possessives) from a piece of the background prompt."""
     kept = [w for w in text.split() if re.sub(r"(?:'s|s')$", "", w.strip(",.;:!?").lower()) not in CHARACTER_WORDS]
     return " ".join(kept).strip(" ,")
+
+
+def _word_key(word: str) -> str:
+    """Lower case, no punctuation or possessive, singular: "Hats," -> "hat", "Bill's" -> "bill"."""
+    w = re.sub(r"(?:'s|s')$", "", word.strip(",.;:!?\"'()").lower())
+    if len(w) > 3 and w.endswith("es") and w[-3] in "sxz":
+        return w[:-2]
+    return w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+
+
+# Things a character wears or holds. A plan detail with one of these is not scenery ("a cowboy hat"
+# would be painted as a giant hat in a field), so it is dropped whole.
+WORN_OR_HELD_WORDS = frozenset(map(_word_key, """
+    hat cap crown tiara helmet hood bonnet cape cloak scarf boot shoe sock glove mitten coat jacket
+    dress shirt skirt trousers pants jeans belt vest apron tie bowtie necklace bracelet ring earring
+    glasses goggles mask costume outfit uniform clothes backpack bag satchel purse wand sword shield
+    lasso spear bow arrow umbrella toy doll teddy badge medal sneaker sandal slipper pocket
+""".split()))
+# Words in a hero's description that say nothing about what the hero *is* (colours, sizes, filler),
+# so they stay allowed in the background ("a blue sky" is fine with a blue hero).
+_LOOK_FILLER = frozenset(map(_word_key, """
+    a an the and or of with without in on at to for from by its it is are has have having wearing
+    holding featuring that who which this one two three four five some very little small big large
+    tall short long round tiny huge happy smiling friendly cute red orange yellow green blue purple
+    pink brown black white grey gray gold golden silver dark light bright colorful colourful striped
+    spotted my our your drawn drawing simple stick
+""".split()))
+
+
+def hero_words(story: dict) -> frozenset[str]:
+    """Every meaningful word of the hero's kind, features and name ("Cowboy Bill", "a stick
+    figure with a cowboy hat" -> cowboy, bill, figure, hat). None of these may reach the
+    background, or the painter paints them as a giant object."""
+    text = " ".join(str(story.get(k) or "") for k in ("hero_name", "hero_who", "hero_description", "character_look"))
+    return frozenset(k for k in map(_word_key, text.split()) if len(k) > 1 and k not in _LOOK_FILLER)
+
+
+def without_words(text: str, words: frozenset[str]) -> str:
+    kept = [w for w in text.split() if _word_key(w) not in words]
+    return " ".join(kept).strip(" ,")
+
+
+def is_scenery(detail: str, hero: frozenset[str]) -> bool:
+    """A plan detail fit for the background: sky, weather, buildings, plants, ground. Not a
+    character, not anything worn or held, and nothing about the hero."""
+    keys = {_word_key(w) for w in detail.split()}
+    return not (names_a_character(detail) or keys & WORN_OR_HELD_WORDS or keys & hero)
 
 
 def preset_backgrounds() -> list[Path]:
@@ -420,18 +470,22 @@ class ImageWorker:
 
     @staticmethod
     def build_background_prompt(story: dict, seg: dict) -> str:
-        """Art style FIRST, then the place, then the no-characters rule. Never the hero: the
-        child's drawing is layered on top in the browser.
+        """Art style and composition FIRST, then the place, then the no-characters rule. Never the
+        hero, nor any word of its kind, features or name: the child's drawing is layered on top in
+        the browser.
 
         SD 1.5 only reads about 75 tokens (roughly 50 words) and pays most attention to the
         beginning. The style goes first so it can never be cut off, and the place is capped."""
-        place = without_characters(seg.get("setting") or story.get("world") or "") or "a storybook landscape"
-        # A detail that names a character is dropped whole ("a sleepy cat" is not scenery).
+        hero = hero_words(story)
+        place = without_words(without_characters(seg.get("setting") or story.get("world") or ""), hero)
+        place = place or "a storybook landscape"
+        # A detail that names a character, the hero or something worn or held is dropped whole
+        # ("a sleepy cat", "a cowboy hat" are not scenery).
         details = [d.strip().rstrip(".") for d in seg.get("visual_details") or []
-                   if d.strip() and not names_a_character(d)]
+                   if d.strip() and is_scenery(d, hero)]
         scene = ", ".join([place.rstrip("."), *details])
         scene = " ".join(scene.split()[: settings.sd_prompt_words])
-        return f"{settings.sd_style}, {scene}, {NO_CHARACTERS}"
+        return f"{settings.sd_style}, {COMPOSITION}, {scene}, {NO_CHARACTERS}"
 
     def build_command(self, prompt: str, seed: int, out_path: Path, plan: dict | None = None) -> list[str]:
         # A list of arguments (never a shell string), so story text cannot inject commands.

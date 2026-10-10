@@ -322,6 +322,22 @@ class Parsing(unittest.TestCase):
             "Pogo, the purple stick figure", "a kite for Mia", "Round sun in the sky", "shadows of trees"]})
         self.assertIn("a village square, Round sun in the sky, shadows of trees, " + NO_CHARACTERS, prompt)
 
+    def test_background_leaves_out_the_hero_and_what_it_wears(self):
+        from storyforge.images import COMPOSITION, ImageWorker, hero_words
+        story = {"hero_name": "Cowboy Bill", "hero_who": "my cowboy",
+                 "hero_description": "a stick figure with a brown cowboy hat, blue jeans and a lasso",
+                 "character_look": "a stick figure with a brown cowboy hat, blue jeans and a lasso"}
+        words = hero_words(story)
+        self.assertTrue({"cowboy", "bill", "hat", "jean", "lasso"} <= words)
+        self.assertFalse({"brown", "blue", "with", "a"} & words)  # colours and filler stay allowed
+        prompt = ImageWorker.build_background_prompt(story, {
+            "setting": "Cowboy Bill's sunny ranch", "visual_details": [
+                "a big cowboy hat", "Hats on a fence", "a red scarf", "a wooden barn", "blue sky with clouds"]})
+        self.assertIn(f"{COMPOSITION}, sunny ranch, a wooden barn, blue sky with clouds, ", prompt)
+        for word in ("owboy", "Bill", "hat", "Hat", "scarf"):
+            self.assertNotIn(word, prompt)
+        self.assertLess(prompt.index(COMPOSITION), prompt.index("ranch"))  # part of the style, up front
+
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
         long_page = "word " * 400

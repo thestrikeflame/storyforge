@@ -53,8 +53,8 @@ _PLAN_KEYS = (
     "default to a forest; use one only when the story truly happens in one. No people, animals or "
     "characters.\n"
     '"visual_details": a list of 2 or 3 concrete things visible in that place, each at most 6 words: '
-    "objects, weather or time of day. Never characters. The page must happen in this place and "
-    "mention every one of these details.\n"
+    "scenery only: sky, weather, time of day, buildings, plants or ground. Never characters. The page "
+    "must happen in this place and mention every one of these details.\n"
     f'"action": what the hero is doing on this page, exactly one of: {", ".join(HERO_ACTIONS)}.\n'
 )
 _COMMON_KEYS = (
