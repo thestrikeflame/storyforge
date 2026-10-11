@@ -627,7 +627,8 @@ async def get_audio(story_id: str, index: int):
     path = await narrator.get(story["id"], seg["index"], seg["text"])
     if path is None:
         raise HTTPException(404, "Narration is not available from the server.")
-    return FileResponse(path, media_type="audio/wav", headers={"Cache-Control": "private, max-age=86400"})
+    media = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
+    return FileResponse(path, media_type=media, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/api/stories/{story_id}/abandon")

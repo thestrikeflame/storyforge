@@ -105,9 +105,11 @@ def setUpModule():
         FAKE_SD_FAIL_FAST_FILE=str(FAST_FAIL),
     )
     # The cloud instance gets its key from a .env-style file, the way the real app does.
-    (TMP / "cloud.env").write_text("# test secrets\nHF_TOKEN=test-token\n")
+    (TMP / "cloud.env").write_text("# test secrets\nHF_TOKEN=test-token\nELEVENLABS_API_KEY=test-eleven\n"
+                                   "ELEVENLABS_VOICE_ID=test-voice\n")
     cloud_env = dict(
         env, IMAGE_MODE="huggingface", STORYFORGE_ENV_FILE=str(TMP / "cloud.env"),
+        TTS_MODE="elevenlabs", ELEVENLABS_URL=HF, ELEVENLABS_TIMEOUT_SECONDS="2",
         HF_URL=HF, HF_TIMEOUT_SECONDS="5", HF_FALLBACK_LOCAL="1", PORT=str(CLOUD_PORT),
         IMAGE_DIR=str(TMP / "cloud_images"), DATA_DIR=str(TMP / "cloud_data"), LOG_DIR=str(TMP / "cloud_logs"),
     )
@@ -886,6 +888,86 @@ class CloudBackgrounds(unittest.TestCase):
         self.assertNotIn("test-token", json.dumps(pages))
         for log_file in (TMP / "cloud_logs").glob("*"):
             self.assertNotIn("test-token", log_file.read_text(errors="replace"), log_file.name)
+
+
+def tts_mode(mode: str) -> None:
+    call("POST", f"{HF}/control", {"tts": mode})
+
+
+def tts_requests() -> int:
+    return call("GET", f"{HF}/state")[1]["tts_requests"]
+
+
+class ElevenLabsNarration(unittest.TestCase):
+    """The cloud instance narrates with TTS_MODE=elevenlabs against the fake server (2 second limit)."""
+
+    def setUp(self):
+        llm_mode("normal")
+        hf_mode("normal")
+        tts_mode("normal")
+
+    def audio(self, story_id: str, index: int = 0):
+        request = urllib.request.Request(f"{CLOUD}/api/stories/{story_id}/segments/{index}/audio")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status, response.headers.get("Content-Type"), response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers.get("Content-Type"), exc.read()
+
+    def test_1_each_page_is_voiced_once_as_soon_as_its_text_is_ready(self):
+        self.assertEqual(call("GET", f"{CLOUD}/api/config")[1]["tts"], "elevenlabs")
+        story_id = new_story(base=CLOUD)
+        page = wait_ready(story_id, 0, CLOUD)
+        text = " ".join(page["text"].split())
+        mp3 = TMP / "cloud_data" / "audio" / f"sf_{story_id}_0.mp3"
+        ready = f"narration ready  story={story_id} page=1 "
+        log_rows = lambda: [r for r in (TMP / "cloud_logs" / "storyforge.log").read_text().splitlines() if ready in r]
+        # made without the browser asking for it
+        wait_for(lambda: mp3.is_file() and log_rows())
+        made = mp3.stat().st_mtime_ns
+        state = call("GET", f"{HF}/state")[1]
+        self.assertIn(text, state["tts_texts"])
+        self.assertEqual(state["tts_last"]["model"], "eleven_flash_v2_5")
+        self.assertTrue(state["tts_last"]["path"].startswith("/v1/text-to-speech/test-voice?"), state["tts_last"]["path"])
+        for _ in range(2):
+            status, kind, body = self.audio(story_id)
+            self.assertEqual((status, kind, body[:3]), (200, "audio/mpeg", b"ID3"))
+        time.sleep(0.5)
+        self.assertEqual(len(log_rows()), 1)  # never voiced again
+        self.assertEqual(mp3.stat().st_mtime_ns, made)
+        log_text = (TMP / "cloud_logs" / "storyforge.log").read_text()
+        row = log_rows()[0]
+        characters = len(text)
+        self.assertIn(f"voice=elevenlabs  characters={characters}  credits={characters // 2}", row)
+        self.assertNotIn("test-eleven", log_text)
+        pages = [call("GET", f"{CLOUD}/api/{p}")[1] for p in ("health", "config", f"stories/{story_id}")]
+        self.assertNotIn("test-eleven", json.dumps(pages))
+
+    def test_2_a_failure_or_a_slow_reply_leaves_the_page_to_the_browser_voice(self):
+        for mode in ("error500", "slow"):
+            tts_mode(mode)
+            story_id = new_story(base=CLOUD)
+            wait_ready(story_id, 0, CLOUD)
+            started = time.time()
+            status, _kind, body = self.audio(story_id)
+            self.assertEqual(status, 404, mode)
+            self.assertIn("message", json.loads(body))
+            self.assertLess(time.time() - started, 8, mode)
+            tts_mode("normal")
+            before = tts_requests()
+            self.assertEqual(self.audio(story_id)[0], 404)  # not tried again (it may have used credits)
+            self.assertEqual(tts_requests(), before)
+            self.assertFalse((TMP / "cloud_data" / "audio" / f"sf_{story_id}_0.mp3").exists())
+        rows = (TMP / "cloud_logs" / "storyforge.log").read_text()
+        self.assertIn("timed out", rows)
+        self.assertIn("HTTP 500: boom", rows)
+
+    def test_3_without_a_key_the_browser_reads(self):
+        code = "from storyforge import speech; print(speech.tts_mode())"
+        env = dict(os.environ, STORYFORGE_SETTINGS=str(TMP / "none.env"), STORYFORGE_ENV_FILE=str(TMP / "none.env"),
+                   TTS_MODE="elevenlabs", ELEVENLABS_API_KEY="", DATA_DIR=str(TMP / "nokey"), LOG_DIR=str(TMP / "nokey"))
+        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.strip().splitlines()[-1], "browser", out.stderr)
 
 
 def drawing_payload(idea: str = "") -> dict:

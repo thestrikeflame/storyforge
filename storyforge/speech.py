@@ -1,6 +1,7 @@
-"""Narration (Piper text-to-speech) and optional offline voice input (whisper.cpp).
+"""Narration (ElevenLabs in the cloud, or Piper on the Jetson) and optional offline voice input
+(whisper.cpp).
 
-Both are optional. Without Piper the browser's built-in voice reads the story.
+All are optional. Without a recording the browser's built-in voice reads the story.
 Without whisper.cpp the browser's built-in speech recognition is used where it exists.
 """
 from __future__ import annotations
@@ -11,6 +12,7 @@ import shutil
 import time
 from pathlib import Path
 
+from . import elevenlabs
 from .config import settings
 from .sysinfo import log, timings
 
@@ -24,12 +26,15 @@ def _piper_path() -> str | None:
 
 
 def tts_mode() -> str:
-    """'piper' (voice made on the Jetson), 'browser' (the browser speaks) or 'off'."""
+    """'elevenlabs' (voice made in the cloud), 'piper' (voice made on the Jetson),
+    'browser' (the browser speaks) or 'off'."""
     mode = settings.tts_mode
     if mode == "off":
         return "off"
     if mode == "browser":
         return "browser"
+    if mode == "elevenlabs":
+        return "elevenlabs" if settings.elevenlabs_api_key else "browser"
     piper_ready = _piper_path() is not None and settings.piper_voice.is_file()
     if piper_ready:
         return "piper"
@@ -46,22 +51,29 @@ def stt_available() -> bool:
     )
 
 
+RECORDED = ("elevenlabs", "piper")  # modes where the server makes a recording for each page
+
+
 class Narrator:
-    """Creates one WAV file per page with Piper and reuses it on replays."""
+    """Creates one recording per page (an MP3 from ElevenLabs or a WAV from Piper) and reuses it on
+    replays: a page that already has one is never voiced again. A page ElevenLabs could not voice
+    is not tried again either (it may have used credits); the browser's voice reads it instead."""
 
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()  # one synthesis at a time keeps CPU use predictable
+        self._lock = asyncio.Lock()  # one Piper synthesis at a time keeps CPU use predictable
         self._inflight: dict[str, asyncio.Task] = {}
+        self._failed: set[str] = set()
 
     def path_for(self, story_id: str, index: int) -> Path:
-        return AUDIO_DIR / f"sf_{story_id}_{index}.wav"
+        suffix = ".mp3" if tts_mode() == "elevenlabs" else ".wav"
+        return AUDIO_DIR / f"sf_{story_id}_{index}{suffix}"
 
     def prepare(self, story_id: str, index: int, text: str) -> None:
         """Start synthesis in the background as soon as the page text exists."""
-        if tts_mode() != "piper":
+        if tts_mode() not in RECORDED:
             return
         key = f"{story_id}_{index}"
-        if key in self._inflight or self.path_for(story_id, index).is_file():
+        if key in self._inflight or key in self._failed or self.path_for(story_id, index).is_file():
             return
         task = asyncio.create_task(self._synthesize(story_id, index, text))
         self._inflight[key] = task
@@ -69,7 +81,7 @@ class Narrator:
 
     async def get(self, story_id: str, index: int, text: str) -> Path | None:
         """Return the narration file, waiting for it when it is still being made."""
-        if tts_mode() != "piper":
+        if tts_mode() not in RECORDED:
             return None
         path = self.path_for(story_id, index)
         if path.is_file():
@@ -77,13 +89,41 @@ class Narrator:
         self.prepare(story_id, index, text)
         task = self._inflight.get(f"{story_id}_{index}")
         if task:
+            wait = settings.elevenlabs_timeout + 5 if tts_mode() == "elevenlabs" else 90
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=90)
+                await asyncio.wait_for(asyncio.shield(task), timeout=wait)
             except (asyncio.TimeoutError, Exception):
                 return None
         return path if path.is_file() else None
 
     async def _synthesize(self, story_id: str, index: int, text: str) -> None:
+        if tts_mode() == "elevenlabs":
+            await self._synthesize_elevenlabs(story_id, index, text)
+        else:
+            await self._synthesize_piper(story_id, index, text)
+
+    async def _synthesize_elevenlabs(self, story_id: str, index: int, text: str) -> None:
+        AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        final = self.path_for(story_id, index)
+        line = " ".join(text.split())
+        started = time.monotonic()
+        try:
+            audio, credits = await asyncio.to_thread(elevenlabs.synthesize, line)
+        except elevenlabs.TTSFailed as exc:
+            self._failed.add(f"{story_id}_{index}")
+            log.error("narration failed  story=%s page=%d  voice=elevenlabs  characters=%d  (%s); "
+                      "the browser's voice reads this page", story_id, index + 1, len(line), exc)
+            return
+        tmp = final.with_suffix(".part.mp3")
+        tmp.write_bytes(audio)
+        os.replace(tmp, final)
+        seconds = round(time.monotonic() - started, 1)
+        # Characters (and the credits ElevenLabs says it charged) for keeping an eye on the budget.
+        log.info("narration ready  story=%s page=%d  voice=elevenlabs  characters=%d  credits=%s  %.1fs",
+                 story_id, index + 1, len(line), "?" if credits is None else credits, seconds)
+        timings.record("narration", seconds=seconds, characters=len(line), credits=credits, voice="elevenlabs")
+
+    async def _synthesize_piper(self, story_id: str, index: int, text: str) -> None:
         piper = _piper_path()
         if not piper:
             return

@@ -100,6 +100,11 @@ class Settings:
     tts_mode: str = _get("TTS_MODE", "auto").lower()
     piper_bin: Path = Path(_get("PIPER_BIN", "/home/akw/jetson-ai/.venv/bin/piper"))
     piper_voice: Path = Path(_get("PIPER_VOICE", "/home/akw/jetson-ai/models/voices/en_US-lessac-medium.onnx"))
+    elevenlabs_api_key: str = field(default=_get("ELEVENLABS_API_KEY", ""), repr=False)  # secret: .env only
+    elevenlabs_voice_id: str = _get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb") or "JBFqnCBsd6RMkjVDRZzb"
+    elevenlabs_model: str = _get("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+    elevenlabs_url: str = _get("ELEVENLABS_URL", "https://api.elevenlabs.io").rstrip("/")
+    elevenlabs_timeout: int = _int("ELEVENLABS_TIMEOUT_SECONDS", 10, 2, 60)
 
     whisper_cli: Path = Path(_get("WHISPER_CLI", "/home/akw/jetson-ai/whisper.cpp/build/bin/whisper-cli"))
     whisper_model: Path = Path(_get("WHISPER_MODEL", "/home/akw/jetson-ai/whisper.cpp/models/ggml-base.en.bin"))

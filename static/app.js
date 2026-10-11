@@ -387,15 +387,32 @@
   }
 
   /* ───────── narration ─────────
-   * "piper":   the Jetson makes a voice recording for each page and the browser plays it.
-   * "browser": the browser's own voice reads the text, sentence by sentence.
-   * Falls back from piper to browser automatically, and to silence with a note when neither works. */
+   * "recorded": the server makes a voice recording for each page (ElevenLabs or Piper) and the
+   *             browser plays it in one reused <audio> element.
+   * "browser":  the browser's own voice reads the text, sentence by sentence.
+   * A page without a recording is read by the browser's voice, and silence with a note when neither works.
+   * iOS Safari only plays sound started by a tap, so the first tap on the page "unlocks" the audio
+   * element (and the browser voice) by playing it right then; a page that was blocked starts on that tap. */
+
+  // A tenth of a second of silence (8 kHz, 8-bit WAV) for unlocking the audio element.
+  const SILENT_WAV = (() => {
+    const n = 800, bytes = new Uint8Array(44 + n), view = new DataView(bytes.buffer);
+    const put = (at, text) => { for (let i = 0; i < text.length; i++) bytes[at + i] = text.charCodeAt(i); };
+    put(0, "RIFF"); view.setUint32(4, 36 + n, true); put(8, "WAVEfmt ");
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, 8000, true); view.setUint32(28, 8000, true); view.setUint16(32, 1, true); view.setUint16(34, 8, true);
+    put(36, "data"); view.setUint32(40, n, true); bytes.fill(128, 44);
+    return `data:audio/wav;base64,${btoa(String.fromCharCode(...bytes))}`;
+  })();
 
   const narrator = {
     mode: "none",
     page: -1,
     playing: false,
-    audio: null,
+    el: null,        // the one <audio> element, reused for every page
+    audio: null,     // { run, text } while the element holds this page's recording
+    unlocked: false,
+    blocked: false,  // the browser refused to play without a tap
     sentences: [],
     sentenceIndex: 0,
     spokenChars: 0,
@@ -405,11 +422,56 @@
 
     init() {
       const canSpeak = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
-      if (state.config.tts === "piper") this.mode = "piper";
+      if (state.config.tts === "piper" || state.config.tts === "elevenlabs") this.mode = "recorded";
       else if (state.config.tts === "browser" && canSpeak) this.mode = "browser";
       else this.mode = "none";
       this.canSpeak = canSpeak;
       if (canSpeak) speechSynthesis.getVoices(); // ask early; voices load in the background
+      const el = new Audio();
+      el.preload = "auto";
+      this.el = el;
+      const mine = () => this.audio && this.audio.run === this.run;
+      el.addEventListener("timeupdate", () => { if (mine() && el.duration) this.setProgress(el.currentTime / el.duration); });
+      el.addEventListener("ended", () => { if (mine()) { this.playing = false; this.setProgress(1); renderNarration(); } });
+      el.addEventListener("error", () => {
+        if (!mine()) return;
+        // No recording for this page (or it would not play): the browser's voice reads this page.
+        const { text } = this.audio;
+        this.audio = null;
+        if (this.canSpeak) this.startSpeech(text, 0);
+        else { this.playing = false; renderNarration(); }
+      });
+      const tapped = (event) => this.unlock(event);
+      document.addEventListener("touchend", tapped, true);
+      document.addEventListener("click", tapped, true);
+    },
+
+    unlock(event) {
+      // The play bar's own buttons start, pause and resume narration themselves.
+      const own = event && event.target && event.target.closest && event.target.closest("#narration, #narration-toggle");
+      if (this.blocked && !own) {
+        this.blocked = false;
+        const page = currentPage();
+        if (page && page.index === this.page && page.text) {
+          this.unlocked = true;
+          this.resume(page.index, page.text); // plays right now, inside the tap
+          return;
+        }
+        this.unlocked = false;
+      }
+      if (this.unlocked) return;
+      this.unlocked = true;
+      // A touch that was really a scroll does not count as a tap: try again on the next one.
+      const refused = (error) => { if (error && error.name === "NotAllowedError") this.unlocked = false; };
+      if (!this.audio) {
+        this.el.src = SILENT_WAV;
+        this.el.play().then(() => { if (!this.audio) this.el.pause(); }).catch(refused);
+      } else if (!this.playing) {
+        this.el.play().then(() => { if (!this.playing) this.el.pause(); }).catch(refused);
+      }
+      if (this.canSpeak && !this.playing) {
+        try { speechSynthesis.speak(new SpeechSynthesisUtterance(" ")); } catch (_) { /* ignore */ }
+      }
     },
 
     voice() {
@@ -424,29 +486,26 @@
       this.page = index;
       this.run += 1;
       this.setProgress(0);
-      if (this.mode === "piper") this.startAudio(index, text);
+      if (this.mode === "recorded") this.startAudio(index, text);
       else this.startSpeech(text, 0);
       renderNarration();
     },
 
     startAudio(index, text) {
       const run = this.run;
-      const audio = new Audio(`/api/stories/${state.story.id}/segments/${index}/audio`);
-      this.audio = audio;
-      audio.addEventListener("timeupdate", () => {
-        if (run === this.run && audio.duration) this.setProgress(audio.currentTime / audio.duration);
-      });
-      audio.addEventListener("ended", () => { if (run === this.run) { this.playing = false; this.setProgress(1); renderNarration(); } });
-      audio.addEventListener("error", () => {
-        if (run !== this.run) return;
-        // The server could not provide a recording: let the browser read instead.
-        this.audio = null;
-        if (this.canSpeak) { this.mode = "browser"; this.startSpeech(text, 0); }
-        else { this.mode = "none"; this.playing = false; }
+      this.audio = { run, text };
+      this.el.src = `/api/stories/${state.story.id}/segments/${index}/audio`;
+      this.playing = true;
+      this.play(run);
+    },
+
+    play(run) {
+      this.el.play().catch((error) => {
+        if (!this.audio || this.audio.run !== run) return;
+        this.playing = false;
+        this.blocked = error && error.name === "NotAllowedError"; // waits for a tap
         renderNarration();
       });
-      this.playing = true;
-      audio.play().catch(() => { if (run === this.run) { this.playing = false; renderNarration(); } });
     },
 
     startSpeech(text, fromSentence) {
@@ -487,7 +546,7 @@
         };
         utterance.onerror = (event) => {
           if (run !== this.run || event.error === "interrupted" || event.error === "canceled") return;
-          if (event.error === "not-allowed") { this.playing = false; renderNarration(); return; } // needs a tap first
+          if (event.error === "not-allowed") { this.playing = false; this.blocked = true; renderNarration(); return; } // needs a tap first
           this.unavailable();
         };
         this.current = utterance; // keep a reference; some browsers drop events otherwise
@@ -507,17 +566,18 @@
     pause() {
       if (!this.playing) return;
       this.playing = false;
-      if (this.audio) this.audio.pause();
+      if (this.audio) this.el.pause();
       else if (this.canSpeak) { this.run += 1; clearTimeout(this.watchdog); speechSynthesis.cancel(); }
       renderNarration();
     },
 
     resume(index, text) {
       if (state.muted || this.mode === "none") return;
+      this.blocked = false;
       if (this.page !== index || this.finished()) { this.start(index, text); return; }
       if (this.audio) {
         this.playing = true;
-        this.audio.play().catch(() => { this.playing = false; renderNarration(); });
+        this.play(this.audio.run);
       } else {
         this.run += 1;
         this.startSpeech(text, this.sentenceIndex); // carries on from the sentence that was interrupted
@@ -526,7 +586,7 @@
     },
 
     finished() {
-      if (this.audio) return this.audio.ended;
+      if (this.audio) return this.el.ended;
       return this.sentenceIndex >= this.sentences.length;
     },
 
@@ -535,7 +595,8 @@
       this.playing = false;
       this.page = -1;
       clearTimeout(this.watchdog);
-      if (this.audio) { this.audio.pause(); this.audio.removeAttribute("src"); this.audio = null; }
+      if (this.audio) { this.el.pause(); this.audio = null; }
+      this.blocked = false;
       if (this.canSpeak) { try { speechSynthesis.cancel(); } catch (_) { /* ignore */ } }
       this.sentences = []; this.sentenceIndex = 0;
     },

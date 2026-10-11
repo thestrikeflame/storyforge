@@ -12,7 +12,10 @@ and for the vision models  POST /control {"vision": "..."}:
   normal        every model answers
   first_fails   the first model is "not supported" (HTTP 400), the others answer
   down          every model answers HTTP 500
-Only the key "test-token" is accepted; anything else gets HTTP 401.
+It also stands in for ElevenLabs:
+    POST /v1/text-to-speech/{voice_id}        answers with a small fake MP3
+and  POST /control {"tts": "..."}:  normal | slow (wait 4 seconds) | error500
+Only the key "test-token" is accepted (and "test-eleven" for ElevenLabs); anything else gets HTTP 401.
 """
 import base64
 import json
@@ -24,7 +27,8 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATE = {"mode": "normal", "requests": 0, "last_prompt": "", "last_path": "", "times": [],
-         "vision": "normal", "vision_models": [], "vision_had_image": False}
+         "vision": "normal", "vision_models": [], "vision_had_image": False,
+         "tts": "normal", "tts_requests": 0, "tts_last": {}, "tts_texts": []}
 DESCRIPTION = "A round orange cat with a tall green hat and a long striped tail."
 
 
@@ -66,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, STATE)
         if self.path == "/v1/chat/completions":
             return self.vision(body)
+        if self.path.startswith("/v1/text-to-speech/"):
+            return self.speech(body)
         if not self.path.endswith("/v1/images/generations"):
             return self._json(404, {"error": "not found"})
         STATE["requests"] += 1
@@ -85,6 +91,27 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+
+    def speech(self, body: dict):
+        STATE["tts_requests"] += 1
+        STATE["tts_last"] = {"path": self.path, "text": body.get("text", ""), "model": body.get("model_id", "")}
+        STATE["tts_texts"].append(body.get("text", ""))
+        if self.headers.get("xi-api-key") != "test-eleven":
+            return self._json(401, {"detail": {"status": "invalid_api_key", "message": "Invalid API key"}})
+        if STATE["tts"] == "error500":
+            return self._json(500, {"detail": {"message": "boom"}})
+        if STATE["tts"] == "slow":
+            time.sleep(4)
+        audio = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x00" * 600
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(audio)))
+            self.send_header("character-cost", str(len(body.get("text", "")) // 2))
+            self.end_headers()
+            self.wfile.write(audio)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def vision(self, body: dict):
         model = body.get("model", "")

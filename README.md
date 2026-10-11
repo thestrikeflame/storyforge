@@ -162,7 +162,24 @@ Going further (not done, because each needs a download or a measured decision on
 
 ## 6. Optional extras
 
+**A natural narrator voice (ElevenLabs, online).** Put your key, and the voice you want, in `.env`
+(never in `settings.env`, which is shared):
+
+```bash
+ELEVENLABS_API_KEY=sk_...
+ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb   # "George", a warm storyteller; any voice ID from your ElevenLabs account works
+```
+
+and keep `TTS_MODE=elevenlabs` in `settings.env`. Each page is voiced once, as soon as its text is
+finished, and kept in `data/audio`, so reading a page again costs nothing. If ElevenLabs fails,
+takes more than 10 seconds or has no key, the browser's own voice reads that page instead.
+Every voiced page writes a `narration ready ... characters=... credits=...` line to the log, so
+you can keep an eye on your credits: `grep "voice=elevenlabs" logs/storyforge.log`.
+On iPads and iPhones the first tap on the page turns the sound on (Safari only plays sound after a tap).
+Set `TTS_MODE=browser` to go back to the browser's voice.
+
 **A nicer narrator voice (Piper, offline).** Without it the browser's own voice reads the story.
+Set `TTS_MODE=auto` (or `piper`) in `settings.env` to use it.
 
 ```bash
 /home/akw/jetson-ai/.venv/bin/python -m pip install piper-tts
@@ -242,7 +259,8 @@ storyforge/config.py      reads settings.env
 storyforge/llm.py         prompts, streaming from Qwen, validation of its replies
 storyforge/store.py       story sessions and saving to disk
 storyforge/images.py      picture queue around sd-cli
-storyforge/speech.py      Piper narration and whisper voice input (both optional)
+storyforge/speech.py      narration (ElevenLabs or Piper) and whisper voice input (all optional)
+storyforge/elevenlabs.py  ElevenLabs text-to-speech client
 storyforge/sysinfo.py     memory readings, logs and timings
 storyforge/tls_proxy.py   the https address for the microphone
 static/index.html, style.css, app.js     the website
