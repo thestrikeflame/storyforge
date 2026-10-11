@@ -558,17 +558,111 @@ def page_beat(story: dict, page_number: int, final: bool) -> str:
     }[stage]
 
 
-def _outline_lines(story: dict) -> str:
+def _outline_lines(story: dict, scrub=lambda text: text) -> str:
     outline = story.get("outline") or {}
     if not outline:
         return ""
     friends = ", ".join(f"{f['name']} ({f['kind']})" for f in outline.get("friends") or [])
     return (
-        f"The quest: {outline['goal']}\n"
-        f"The problem in the way: {outline['obstacle']}\n"
+        f"The quest: {scrub(outline['goal'])}\n"
+        f"The problem in the way: {scrub(outline['obstacle'])}\n"
         + (f"Friends in this story: {friends}\n" if friends else "")
-        + f"The happy ending to steer toward: {outline['ending']}\n"
+        + f"The happy ending to steer toward: {scrub(outline['ending'])}\n"
     )
+
+
+# ---- the hero's looks stay on page 1 ----
+# Feature words are what the hero looks like (colours, clothes, body parts...), taken from the drawing's
+# description, "Who is this?" and the page-1 look. Pages 2+ never get them in the prompt, and a page
+# sentence that names the hero together with two of them is dropped. Sizes and small words are not
+# features ("Crabby saw a big wave" is fine).
+_LOOK_SIZES = frozenset("big small large little tiny long short tall round wide huge giant".split())
+_NOT_FEATURES = frozenset("""with and has have having wearing holding like creature character cartoon
+    drawing drawn word words featuring its his her their one two three four some very cute friendly
+    simple hand oval shape shaped""".split())
+
+
+def hero_feature_words(story: dict) -> frozenset[str]:
+    """Stems of the words that describe how the hero looks (never its name or kind)."""
+    text = " ".join(story.get(k) or "" for k in ("hero_description", "character_look", "hero_who"))
+    name, kind = hero_name_kind(story)
+    own = {_stem(w) for w in re.findall(r"[A-Za-z]+", f"{name} {kind}")}
+    found = set()
+    for word in re.findall(r"[A-Za-z]+", text.lower()):
+        if len(word) < 3 or word in _SMALL_WORDS or word in _LOOK_SIZES or word in _NOT_FEATURES:
+            continue
+        stem = _stem(word)
+        if stem not in own:
+            found.add(stem)
+    return frozenset(found)
+
+
+def hero_stems(story: dict) -> frozenset[str]:
+    """Stems that name the hero: its name and the noun of its kind ("Crabby", "crab")."""
+    name, kind = hero_name_kind(story)
+    words = [w for w in re.findall(r"[A-Za-z]+", name) if len(w) > 2 and w.lower() not in _SMALL_WORDS]
+    if kind:
+        words.append(kind.split()[-1])
+    return frozenset(_stem(w) for w in words if w.lower() != "hero")
+
+
+COLOUR_WORDS = frozenset("""red orange yellow green blue purple pink brown black white gray grey gold golden
+    silver violet teal turquoise""".split())
+
+
+def scrub_looks(text: str, features: frozenset[str], kind_stem: str = "") -> str:
+    """The text without descriptions of the hero: phrases set off by commas ("Mira, a small purple
+    dragon, found...") or starting with "with" ("a crab with big claws") that hold a feature word,
+    and colours right before its kind or a feature ("red crab" -> "crab"). Other words stay, so a
+    summary still reads ("found a shell" keeps its shell)."""
+    if not text or not features:
+        return text
+    has = lambda part: any(_stem(w) in features for w in re.findall(r"[A-Za-z]+", part))
+    text = re.sub(r",\s*(?:a|an|the)\s[^,.;!?]*,\s*", lambda m: " " if has(m.group(0)) else m.group(0), text, flags=re.I)
+    def with_phrase(m: re.Match) -> str:
+        # "with big claws and a tie lives..." -> drop through the last feature word only
+        words = m.group(1).split()
+        last = max((i for i, w in enumerate(words) if _stem(w.strip(",")) in features), default=-1)
+        return "" if last < 0 else " " + " ".join(words[last + 1:]) if words[last + 1:] else ""
+    text = re.sub(r"\s*\bwith\s+((?:[A-Za-z'-]+\s*){1,6})", lambda m: m.group(0) if not has(m.group(1)) else with_phrase(m) + " ",
+                  text, flags=re.I)
+    targets = set(features) | ({kind_stem} if kind_stem else set())
+    text = re.sub(r"\b([A-Za-z]+)\s+(?=([A-Za-z]+))",
+                  lambda m: "" if m.group(1).lower() in COLOUR_WORDS and _stem(m.group(2)) in targets else m.group(0), text)
+    text = re.sub(r"\s+([,.;!?])", r"\1", re.sub(r"\s{2,}", " ", text))
+    return text.strip(" ,")
+
+
+def drop_hero_looks(text: str, hero: frozenset[str], features: frozenset[str], floor: int = 0,
+                    finished_only: bool = False) -> tuple[str, int]:
+    """Pages 2+: drop every finished sentence that names the hero (name or kind) together with two or
+    more of its feature words ("Crabby, the red crab with big claws, smiled"). Paragraphs are kept;
+    an unfinished last sentence is left alone (or left out with `finished_only`, while streaming).
+    Never takes the page under `floor` words. Returns (text, sentences dropped)."""
+    if not text or not hero or not features:
+        return text, 0
+    dropped = 0
+    paragraphs = []
+    blocks = text.split("\n\n")
+    for b, paragraph in enumerate(blocks):
+        pieces = _SENTENCE_END.split(paragraph.strip())
+        kept = []
+        for i, piece in enumerate(pieces):
+            finished = (i < len(pieces) - 1 or b < len(blocks) - 1
+                        or bool(re.search(r"[.!?][\"'\u201d\u2019]?$", piece)))
+            if not finished and finished_only:
+                continue
+            stems = {_stem(w) for w in re.findall(r"[A-Za-z']+", piece)}
+            if finished and stems & hero and len(stems & features) >= 2:
+                dropped += 1
+            else:
+                kept.append(piece)
+        if any(k.strip() for k in kept):
+            paragraphs.append(" ".join(kept))
+    result = "\n\n".join(paragraphs)
+    if dropped and word_count(result) < floor:
+        return text, 0  # keep the page whole rather than too short
+    return result, dropped
 
 
 def _choices_key(next_beat: str) -> str:
@@ -639,6 +733,10 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
         # Only a short summary: the previous page's text would drown out the reader's choice (which a
         # small model then ignores), and its last sentence tempted it to retell how that page ended.
         name, kind = hero_name_kind(story)
+        features = hero_feature_words(story)
+        kind_stem = _stem(kind.split()[-1]) if kind else ""
+        scrub = lambda text: scrub_looks(text, features, kind_stem)
+        outline_ok = bool(outline) and not outline.get("fallback")
         if final:
             task = (
                 f"Write page {page_number}, the LAST page. Wrap up the quest with a happy, satisfying "
@@ -657,13 +755,14 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             choices_key = _choices_key(page_beat(story, page_number + 1, final=page_number + 1 >= pages))
         decision = action or "Continue the adventure in the most natural way."
         user = (
-            f"Story title: {story.get('title') or 'Untitled'}\n"
-            f"The reader's original idea: \"{story['premise']}\"\n"
-            # Only the hero's name and kind after page 1: never its looks, which the model retold.
+            # Only the hero's name and kind after page 1, never its looks, which the model retold: no
+            # "Who is this?" words, no idea (the outline holds the quest), and the title, summary and
+            # outline without the hero's feature words.
+            f"Story title: {scrub(story.get('title') or '') or 'Untitled'}\n"
+            + ("" if outline_ok else f"The reader's original idea: \"{scrub(story['premise'])}\"\n")
             + f"The hero: {name}{', ' + kind if kind else ''}. Never describe what {name} looks like "
             "(no colours, size, body or clothes): the reader already knows.\n"
-            + (f'The reader calls the hero: "{story["hero_who"]}"\n' if story.get("hero_who") else "")
-            + _outline_lines(story)
+            + _outline_lines(story, scrub)
             + ("The hero only holds or uses things it already has, or things it finds in the story.\n"
                + weapon_rule(f"{story['hero_description']} {story.get('hero_who') or ''}")
                if story.get("hero_description") else "")
@@ -673,7 +772,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             + (" (move somewhere new when the reader's choice goes somewhere)\n" if event
                else " (stay there or move somewhere new, as the story needs)\n")
             +
-            f"Story so far: {short_summary(story.get('summary')) or 'the story has just begun'}\n\n"
+            f"Story so far: {scrub(short_summary(story.get('summary'))) or 'the story has just begun'}\n\n"
             f"The reader decided: \"{decision}\"\n\n"
             f"{task}\n"
             f"This page's beat: {beat}\n\n"

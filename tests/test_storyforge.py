@@ -601,6 +601,41 @@ class Parsing(unittest.TestCase):
         self.assertIn("Never a fight, a chase or anything scary", prompt)
         self.assertIn('"goal_done"', prompt)
 
+    def test_pages_after_the_first_never_re_describe_the_hero(self):
+        from storyforge import llm
+        story = {"premise": "A story starring a red crab with big claws", "hero_name": "Crabby",
+                 "hero_description": "a red crab with big claws, a striped shell and a blue tie",
+                 "hero_who": "my red crab Crabby", "title": "Red Crab Hero",
+                 "summary": "Crabby, a red crab with big claws, found a shell. Then he swam to the reef.",
+                 "outline": {"hero_name": "Crabby", "hero_kind": "crab", "goal": "find the pearl", "obstacle": "a wave",
+                             "friends": [], "goal_done": "g", "ending": "home", "pages": 6},
+                 "segments": [{"status": "ready", "text": "x", "setting": "a reef"}] * 2}
+        hero, features = llm.hero_stems(story), llm.hero_feature_words(story)
+        self.assertTrue({"red", "claw", "tie"} <= features)
+        self.assertNotIn("big", features)  # sizes are not features
+        # page 3: the sentence re-describing the hero goes, the plain one stays
+        page = ("Crabby, the red crab with big claws, smiled. Crabby smiled. The red sun rose over the striped rocks. "
+                "His claws clicked as Crabby waved to the fish and swam on toward the glowing reef.")
+        text, dropped = llm.drop_hero_looks(page, hero, features, floor=llm.minimum_words())
+        self.assertEqual(dropped, 1)
+        self.assertNotIn("the red crab with big claws", text)
+        self.assertTrue(text.startswith("Crabby smiled."))
+        self.assertIn("The red sun rose over the striped rocks.", text)  # not about the hero
+        self.assertIn("His claws clicked", text)                         # only one feature word
+        # never below the minimum: a page that is nothing but such a sentence stays whole
+        short = "Crabby, the red crab with big claws and a blue tie, smiled happily at the sea."
+        self.assertEqual(llm.drop_hero_looks(short, hero, features, floor=llm.minimum_words()), (short, 0))
+        # while streaming: only finished sentences, the unfinished one left out
+        self.assertEqual(llm.drop_hero_looks("Crabby, the red crab with big claws, smiled. Crabby sw", hero, features,
+                                             finished_only=True)[0], "")
+        # the prompt for pages 2+ carries the name and kind, never the looks
+        prompt = llm.build_messages(story, "Go", False)[1]["content"]
+        self.assertIn("The hero: Crabby, a crab.", prompt)
+        for word in ("red", "claws", "striped", "tie", "my red crab"):
+            self.assertNotIn(word, prompt.replace("Never describe what Crabby looks like (no colours, size, body or clothes)", ""))
+        self.assertIn("Story title: Crab Hero", prompt)
+        self.assertIn("Story so far: Crabby found a shell.", prompt)
+
     def test_choices_are_forks_not_small_actions(self):
         from storyforge import llm
         raw = json.dumps({"setting": "a reef", "visual_details": ["a", "b"], "props": [], "action": "swimming",
@@ -1258,7 +1293,9 @@ class DrawnHero(unittest.TestCase):
         self.assertEqual(saved["hero_who"], "my bunny 'Ricky'")
         call("POST", f"{CLOUD}/api/stories/{story['id']}/continue", {"kind": "continue", "after": 0})
         wait_ready(story["id"], 1, CLOUD)
-        self.assertIn("The reader calls the hero: \"my bunny 'Ricky'\"", call("GET", f"{LLM}/state")[1]["last_user"])
+        later = call("GET", f"{LLM}/state")[1]["last_user"]
+        self.assertNotIn("my bunny", later)  # after page 1: the hero's name and kind only
+        self.assertIn("The hero: ", later)
         # each drawing's vision request is traceable: image size, exact prompt, model, raw answer
         log_text = (TMP / "cloud_logs" / "storyforge.log").read_text()
         self.assertIn("hero vision request  image=?", log_text)  # the test JPEG is not a real one
