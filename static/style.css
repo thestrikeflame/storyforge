@@ -215,20 +215,70 @@ body[data-view="reading"] .top { min-height: 4.75rem; }
 body:not([data-view="landing"]) .cover { display: none; }
 .motes { display: none; }
 
+/* ───────── a real open book (the title screen and the story page share it) ─────────
+   A purple hardcover a few pixels larger than the pages, with its thickness as a darker band below
+   and a soft shadow on the ground; a stack of cream page edges down the outer sides and along the
+   bottom, thinning to a hair at the spine (the two triangles of cover colour hide the rest). All of it
+   is the book's own background and shadows, so it costs nothing while reading; the curve of the
+   paper is painted under each page's content (see the pages), never over the picture or the hero. */
+.title-book, .book {
+  --cover: var(--violet);
+  --cover-edge: #3f2552;
+  --lip: 6px;        /* cover beyond the pages */
+  --stack: 12px;     /* page edges at the sides: six lines */
+  --stack-b: 8px;    /* page edges along the bottom, at the outer corners */
+  --sheet: #fffaf0;
+  --sheet-line: #d6c5a2;
+  border: 0;
+  border-radius: 20px;
+  padding: var(--lip) calc(var(--lip) + var(--stack)) calc(var(--lip) + var(--stack-b));
+  background:
+    linear-gradient(to bottom right, transparent 50%, var(--cover) 50%)
+      left calc(var(--lip) + var(--stack)) bottom var(--lip) / calc(50% - var(--lip) - var(--stack)) calc(var(--stack-b) - 1px) no-repeat,
+    linear-gradient(to bottom left, transparent 50%, var(--cover) 50%)
+      right calc(var(--lip) + var(--stack)) bottom var(--lip) / calc(50% - var(--lip) - var(--stack)) calc(var(--stack-b) - 1px) no-repeat,
+    repeating-linear-gradient(to bottom, var(--sheet) 0 1px, var(--sheet-line) 1px 2px)
+      left var(--lip) bottom var(--lip) / calc(100% - 2 * var(--lip)) var(--stack-b) no-repeat,
+    repeating-linear-gradient(to right, var(--sheet-line) 0 1px, var(--sheet) 1px 2px)
+      left var(--lip) top var(--lip) / var(--stack) calc(100% - 2 * var(--lip)) no-repeat,
+    repeating-linear-gradient(to left, var(--sheet-line) 0 1px, var(--sheet) 1px 2px)
+      right var(--lip) top var(--lip) / var(--stack) calc(100% - 2 * var(--lip)) no-repeat,
+    var(--cover);
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, .2),
+    0 7px 0 var(--cover-edge),
+    0 26px 24px -12px rgba(28, 20, 50, .5),
+    0 44px 60px -24px rgba(28, 20, 50, .35);
+}
+/* The gutter: a deep crease down the middle, over the pages' inner edges only (never as far as the
+   picture, which sits inside the page's padding). */
+.title-spine, .book::after {
+  content: ""; position: absolute; z-index: 10; pointer-events: none;
+  top: var(--lip); bottom: calc(var(--lip) + var(--stack-b)); left: calc(50% - 14px); width: 28px;
+  background: linear-gradient(90deg, transparent, rgba(50, 28, 48, .16) 30%, rgba(40, 20, 40, .5) 50%,
+                              rgba(50, 28, 48, .16) 70%, transparent);
+}
+/* The curve of the paper, under each page's content: shade where it bends into the spine, light on
+   the lifted outer edge and corners. */
+.title-book, .book { --bend-left: linear-gradient(to left, rgba(60, 35, 55, .26), rgba(60, 35, 55, .08) 7%, transparent 16%),
+                                  linear-gradient(to right, rgba(255, 255, 255, .28), transparent 3%),
+                                  radial-gradient(circle at 0 100%, rgba(255, 255, 255, .3), transparent 26px),
+                                  radial-gradient(circle at 0 0, rgba(255, 255, 255, .22), transparent 22px);
+                     --bend-right: linear-gradient(to right, rgba(60, 35, 55, .22), rgba(60, 35, 55, .07) 7%, transparent 16%),
+                                   linear-gradient(to left, rgba(255, 255, 255, .3), transparent 3%),
+                                   radial-gradient(circle at 100% 100%, rgba(255, 255, 255, .32), transparent 26px),
+                                   radial-gradient(circle at 100% 0, rgba(255, 255, 255, .24), transparent 22px); }
+
 .title-book {
   width: min(1040px, 94vw);
   min-height: min(680px, 80vh);
   display: grid; grid-template-columns: 1fr 1fr;
   position: relative; z-index: 2;
-  border: 10px solid var(--violet); border-radius: 24px;
-  background: var(--yellow);
-  box-shadow: 0 26px 0 var(--violet-deep), 0 38px 60px rgba(28, 23, 82, .55);
   animation: titleArrive .85s cubic-bezier(.18, .8, .25, 1) both;
-  overflow: hidden;
 }
 html.opening .title-book { animation-play-state: paused; } /* it arrives once the opening is over */
 .title-page { position: relative; overflow: hidden; }
-.title-left { background: var(--blue); border-radius: 12px 0 0 12px; }
+.title-left { background: var(--bend-left), var(--blue); border-radius: 10px 0 0 10px; }
 /* a little ringed planet in the top corner (the ring is ::after, tilted) */
 .title-left::before {
   content: ""; position: absolute; z-index: 1; width: 92px; height: 92px; top: 46px; right: 52px; border-radius: 50%;
@@ -244,8 +294,7 @@ html.opening .title-book { animation-play-state: paused; } /* it arrives once th
   border: 6px solid #c889ee; border-top-color: transparent; transform: rotate(-16deg);
 }
 .title-left .cover-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 5; }
-.title-right { background: var(--cream); border-radius: 0 12px 12px 0; color: #46354b; display: grid; place-items: center; }
-.title-spine { position: absolute; width: 24px; left: calc(50% - 12px); top: 0; bottom: 0; z-index: 10; background: linear-gradient(90deg, rgba(55, 35, 46, .3), rgba(255, 255, 255, .32), rgba(55, 35, 46, .28)); pointer-events: none; }
+.title-right { background: var(--bend-right), var(--cream); border-radius: 0 10px 10px 0; color: #46354b; display: grid; place-items: center; }
 .paper-moon { position: absolute; width: 132px; height: 132px; border-radius: 50%; background: #fff2a2; top: 70px; left: 75px; box-shadow: 0 0 0 18px rgba(255, 231, 134, .12), 0 0 60px rgba(255, 231, 134, .32); animation: moonBob 4s ease-in-out infinite; }
 .paper-star {
   position: absolute; z-index: 3; width: 30px; height: 30px; overflow: visible;
@@ -477,36 +526,27 @@ textarea:focus, .own-idea input:focus { border-color: var(--rust); outline: none
 .leaf-button svg { width: 1.4rem; height: 1.4rem; fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 .leaf-button:disabled { opacity: .35; box-shadow: none; }
 
-/* The design's two-panel book: a green frame, the picture on the left, dotted paper on the right,
-   and a soft spine shadow between them. */
+/* The design's two-panel book (the real-book look above): the picture on the left, dotted paper on
+   the right. */
 .book {
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  border: 9px solid var(--frame);
-  border-radius: 26px;
-  background: var(--paper);
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, .55) inset, 0 4px 0 var(--frame-edge), 0 24px 50px rgba(55, 57, 42, .18);
   perspective: 1800px;
   overflow: clip;
-}
-.book::after {
-  content: ""; position: absolute; top: 0; bottom: 0; left: calc(50% - 10px); width: 20px; z-index: 4; pointer-events: none;
-  background: linear-gradient(90deg, rgba(46, 45, 35, .18), rgba(255, 255, 255, .4), rgba(46, 45, 35, .08));
 }
 .page { position: relative; color: var(--text); min-width: 0; }
 .page-picture {
   padding: clamp(var(--s4), 2.2vw, var(--s6));
   display: grid; place-items: center;
-  background: var(--frame-light);
-  background-image: radial-gradient(circle at 30% 20%, rgba(255, 255, 255, .16), transparent 60%);
+  border-radius: 10px 0 0 10px;
+  background: var(--bend-left), radial-gradient(circle at 30% 20%, rgba(255, 255, 255, .16), transparent 60%), var(--frame-light);
 }
 .page-words {
   padding: clamp(var(--s5), 3vw, 3rem) clamp(var(--s5), 3.2vw, 3.2rem) var(--s5);
   display: flex; flex-direction: column;
-  background-color: var(--paper);
-  background-image: radial-gradient(var(--paper-dots) .8px, transparent 1px);
-  background-size: 8px 8px;
+  border-radius: 0 10px 10px 0;
+  background: var(--bend-right), radial-gradient(var(--paper-dots) .8px, transparent 1px) 0 0 / 8px 8px, var(--paper);
 }
 
 /* The picture keeps its size; only a paper mat is drawn around it (box-shadow, no layout change). */
@@ -975,8 +1015,19 @@ textarea:focus, .own-idea input:focus { border-color: var(--rust); outline: none
   .top-centre { grid-column: 1 / -1; grid-row: 2; }
   body[data-view="invite"] .top-centre { display: none; }
   .book-row { grid-template-columns: 1fr 1fr; }
-  .book { grid-column: 1 / -1; grid-row: 1; grid-template-columns: 1fr; border-width: 6px; }
+  .book { grid-column: 1 / -1; grid-row: 1; grid-template-columns: 1fr; }
   .book::after { display: none; }
+  /* One page above the other: page edges at both sides and along the bottom, without the taper. */
+  .book { background:
+    repeating-linear-gradient(to bottom, var(--sheet) 0 1px, var(--sheet-line) 1px 2px)
+      left var(--lip) bottom var(--lip) / calc(100% - 2 * var(--lip)) var(--stack-b) no-repeat,
+    repeating-linear-gradient(to right, var(--sheet-line) 0 1px, var(--sheet) 1px 2px)
+      left var(--lip) top var(--lip) / var(--stack) calc(100% - 2 * var(--lip)) no-repeat,
+    repeating-linear-gradient(to left, var(--sheet-line) 0 1px, var(--sheet) 1px 2px)
+      right var(--lip) top var(--lip) / var(--stack) calc(100% - 2 * var(--lip)) no-repeat,
+    var(--cover); }
+  .page-picture { border-radius: 10px 10px 0 0; background: radial-gradient(circle at 30% 20%, rgba(255, 255, 255, .16), transparent 60%), var(--frame-light); }
+  .page-words { border-radius: 0 0 10px 10px; background: radial-gradient(var(--paper-dots) .8px, transparent 1px) 0 0 / 8px 8px, var(--paper); }
   .leaf-button { justify-self: end; }
   #next-page { justify-self: start; }
   .page-picture { padding-bottom: var(--s5); }
@@ -986,10 +1037,20 @@ textarea:focus, .own-idea input:focus { border-color: var(--rust); outline: none
 }
 @media (max-width: 760px) {
   body[data-view="landing"] .stage { padding: 20px 14px 30px; justify-content: flex-start; }
-  .title-book { grid-template-columns: 1fr; min-height: 0; }
-  .title-left { height: 260px; border-radius: 12px 12px 0 0; }
-  .title-right { border-radius: 0 0 12px 12px; }
-  .title-spine { width: 100%; height: 18px; left: 0; top: 251px; bottom: auto; background: linear-gradient(rgba(55, 35, 46, .3), rgba(255, 255, 255, .3), rgba(55, 35, 46, .3)); }
+  .title-book { grid-template-columns: 1fr; min-height: 0;
+    --lip: 5px; --stack: 8px; --stack-b: 6px;
+    background:
+      repeating-linear-gradient(to bottom, var(--sheet) 0 1px, var(--sheet-line) 1px 2px)
+        left var(--lip) bottom var(--lip) / calc(100% - 2 * var(--lip)) var(--stack-b) no-repeat,
+      repeating-linear-gradient(to right, var(--sheet-line) 0 1px, var(--sheet) 1px 2px)
+        left var(--lip) top var(--lip) / var(--stack) calc(100% - 2 * var(--lip)) no-repeat,
+      repeating-linear-gradient(to left, var(--sheet-line) 0 1px, var(--sheet) 1px 2px)
+        right var(--lip) top var(--lip) / var(--stack) calc(100% - 2 * var(--lip)) no-repeat,
+      var(--cover); }
+  .title-left { height: 260px; border-radius: 10px 10px 0 0; background: var(--blue); }
+  .title-right { border-radius: 0 0 10px 10px; background: var(--cream); }
+  .title-spine { width: auto; height: 18px; left: calc(var(--lip) + var(--stack)); right: calc(var(--lip) + var(--stack)); top: calc(var(--lip) + 251px); bottom: auto;
+    background: linear-gradient(rgba(50, 28, 48, .1), rgba(40, 20, 40, .4) 50%, rgba(50, 28, 48, .1)); }
   .paper-moon { width: 90px; height: 90px; top: 35px; left: 15%; }
   .menu-hills { bottom: -250px; }
   .menu-tree { transform: scale(.65); transform-origin: bottom; bottom: 4px; }
