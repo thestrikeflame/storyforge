@@ -543,7 +543,7 @@ class Flow(unittest.TestCase):
         # Page 1's words carry the class "opening" (for the drop cap): no rule may hide a bare .opening,
         # which the opening animation once did, leaving page 1 blank.
         import re
-        css = (ROOT / "static" / "style.css").read_text()
+        css = re.sub(r"/\*.*?\*/", "", (ROOT / "static" / "style.css").read_text(), flags=re.S)  # rules only, not comments
         self.assertIsNone(re.search(r"(^|[\s,}])\.opening\s*[{,:]", css, re.M))
         # no hero drawn on this instance yet: the cover keeps the fox
         self.assertEqual(call("GET", f"{BASE}/api/cover-hero")[0], 404)
