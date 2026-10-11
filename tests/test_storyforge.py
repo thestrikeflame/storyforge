@@ -642,6 +642,8 @@ class Flow(unittest.TestCase):
         self.assertIn(b"Start with an idea", body)
         # the opening (skippable, once per visit) and the story page's chapter row
         self.assertIn(b"A story is waking up...", body)
+        self.assertIn(b"intro=1", body)              # ?intro=1 always plays it
+        self.assertIn(b'id="title-replay"', body)    # tapping the title plays it again
         self.assertIn(b'id="chapter-progress"', body)
         # Page 1's words carry the class "opening" (for the drop cap): no rule may hide a bare .opening,
         # which the opening animation once did, leaving page 1 blank.

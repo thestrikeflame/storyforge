@@ -12,9 +12,11 @@
   <script>
     // The opening (a storybook opening itself) plays once per visit, before anything is drawn, so
     // the cover never flashes first. Not when /draw opens a story, and never with reduced motion.
+    // ?intro=1 always plays it (for showing it off); reduced motion still hides it.
     try {
-      if (!/[?&]story=/.test(location.search) && !sessionStorage.getItem("storyforge.opened")
-          && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      if (/[?&]intro=1(&|$)/.test(location.search)
+          || (!/[?&]story=/.test(location.search) && !sessionStorage.getItem("storyforge.opened")
+              && !matchMedia("(prefers-reduced-motion: reduce)").matches)) {
         document.documentElement.classList.add("opening");
       }
     } catch (_) { /* no storage: skip the opening */ }
@@ -99,9 +101,12 @@
       <div class="title-page title-right">
         <div class="title-content">
           <span class="eyebrow">A STORY YOU DRAW</span>
-          <h2 class="title-word" aria-label="StoryForge">
-            <span class="rainbow-word" aria-hidden="true"><i>S</i><i>t</i><i>o</i><i>r</i><i>y</i></span>
-            <span class="rainbow-word short" aria-hidden="true"><i>F</i><i>o</i><i>r</i><i>g</i><i>e</i></span>
+          <h2 class="title-word">
+            <!-- Tapping the title plays the opening again (app.js). -->
+            <button class="title-replay" id="title-replay" type="button" aria-label="StoryForge. Play the opening again">
+              <span class="rainbow-word" aria-hidden="true"><i>S</i><i>t</i><i>o</i><i>r</i><i>y</i></span>
+              <span class="rainbow-word short" aria-hidden="true"><i>F</i><i>o</i><i>r</i><i>g</i><i>e</i></span>
+            </button>
           </h2>
           <p class="cover-line" id="cover-line">Draw a hero. Watch it come alive.</p>
           <div class="top-landing">

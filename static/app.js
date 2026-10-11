@@ -1379,23 +1379,43 @@
     if (event.key === "ArrowRight") showPage(state.view + 1);
   });
 
-  /* The opening (index.html starts it before the first paint): the book opens and its pages flutter,
-   * then the cover. It ends by itself after 3.6 s, or straight away on a tap or a key. */
-  (function opening() {
-    const root = document.documentElement;
-    if (!root.classList.contains("opening")) return;
-    let over = false;
-    const finish = () => {
-      if (over) return;
-      over = true;
+  /* The opening (index.html starts it before the first paint, or ?intro=1 forces it): the book
+   * opens and its pages flutter, then the cover. It ends by itself after 3.6 s, or straight away
+   * on a tap or a key. Tapping the title on the cover plays it again. */
+  const opening = {
+    over: true,
+    timer: null,
+
+    start() {
+      const root = document.documentElement;
+      // Hidden first, then shown again: that restarts every animation inside (and the cover's arrival).
+      root.classList.remove("opening", "opening-out");
+      const book = document.querySelector(".title-book");
+      if (book) book.style.animation = "none";
+      void root.offsetWidth;
+      if (book) book.style.animation = "";
+      root.classList.add("opening");
+      this.over = false;
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => this.finish(), 3600);
+    },
+
+    finish() {
+      if (this.over) return;
+      this.over = true;
+      clearTimeout(this.timer);
       try { sessionStorage.setItem("storyforge.opened", "1"); } catch (_) { /* no storage */ }
+      const root = document.documentElement;
       root.classList.add("opening-out");
-      setTimeout(() => root.classList.remove("opening", "opening-out"), 450);
-    };
-    setTimeout(finish, 3600);
-    $("opening").addEventListener("click", finish);
-    document.addEventListener("keydown", finish, { once: true });
-  })();
+      setTimeout(() => { if (this.over) root.classList.remove("opening", "opening-out"); }, 450);
+    },
+  };
+  $("opening").addEventListener("click", () => opening.finish());
+  document.addEventListener("keydown", (event) => { if (!opening.over && event.key !== "Tab") opening.finish(); });
+  $("title-replay").addEventListener("click", () => {
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) opening.start();
+  });
+  if (document.documentElement.classList.contains("opening")) opening.start();
 
   (async function boot() {
     state.muted = recall(STORAGE_MUTED) === "1";
