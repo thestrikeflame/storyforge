@@ -124,6 +124,8 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
     if not complete or llm.word_count(cleaned) < llm.minimum_words() or '"visual_prompt"' in cleaned:
         # While it streams: only finished sentences that are new, gentle and within the length.
         shown = llm.drop_repeats(cleaned, check["earlier"], finished_only=True)[0]
+        if check.get("looks"):
+            shown = llm.drop_hero_looks(shown, *check["looks"], finished_only=True)[0]
         seg["partial"] = llm.tidy_page(shown, check["max_words"])[0]
         return
     cleaned, dropped = llm.drop_repeats(cleaned, check["earlier"], floor=llm.minimum_words())
@@ -142,6 +144,8 @@ def _final_touches(seg: dict, text: str, check: dict) -> str:
     gentle (a rough sentence dropped, or its words softened), the reader's choice (a bridge sentence
     in front when the page missed it), the reading level's length (whole sentences up to its
     maximum), and on the last page the quest's goal (a closing sentence when the page missed it)."""
+    if check.get("looks"):
+        text, seg["looks_dropped"] = llm.drop_hero_looks(text, *check["looks"], floor=llm.minimum_words())
     text, notes = llm.tidy_page(text, 10_000, floor=llm.minimum_words())
     seg["gentle_fixed"] = notes["gentle"]
     if check["event"]:
@@ -231,6 +235,8 @@ async def write_segment(story: dict, seg: dict) -> None:
             for attempt in (1, 2):
                 check = {"event": event, "known": known, "hero": story.get("hero_name"), "earlier": earlier,
                          "max_words": level.max_words,
+                         # pages 2+: sentences re-describing the hero are dropped
+                         "looks": (llm.hero_stems(story), llm.hero_feature_words(story)) if not first else None,
                          "goal": (story.get("outline") or {}).get("goal_done") if final else None}
                 stream = llm.LLMStream(
                     messages=llm.build_messages(story, seg["action"], final, event=event),
@@ -357,6 +363,9 @@ async def write_segment(story: dict, seg: dict) -> None:
                     llm.word_count(seg["text"]), level.min_words, level.max_words, level.key)
     if seg.get("repeats_dropped"):
         log.warning("page check failed  %s  check=repeat  sentences_dropped=%d", where, seg["repeats_dropped"])
+    if seg.get("looks_dropped"):
+        log.warning("page check failed  %s  check=looks  sentences_dropped=%d  (re-described the hero)", where,
+                    seg["looks_dropped"])
     if seg.get("gentle_fixed"):
         log.warning("page check failed  %s  check=gentle  sentences_dropped_or_softened=%d", where, seg["gentle_fixed"])
     if seg.get("trimmed_from"):
