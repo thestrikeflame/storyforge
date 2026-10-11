@@ -179,6 +179,9 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
         "hero_action": seg.get("hero_action") or "",
         "props": seg.get("props") or [],
         "words": seg.get("words") or [],
+        # The story's hero layer, so a hero painted after page 1 started still appears.
+        "hero_url": hero_url(story),
+        "hero_pending": story.get("hero_status") == "making",
         # Definitions are still to come: the browser keeps asking for this page until they arrive.
         "words_pending": words_pending(story, seg),
         "error": seg.get("error"),
@@ -197,6 +200,10 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
     }
 
 
+def hero_url(story: dict) -> str | None:
+    return f"/api/stories/{story['id']}/hero?v={story['hero']}" if story.get("hero") else None
+
+
 def words_pending(story: dict, seg: dict) -> bool:
     return (seg["status"] == "ready" and bool(seg.get("text")) and seg.get("words") is None
             and seg.get("words_attempts", 0) < WORDS_MAX_ATTEMPTS and not story.get("abandoned"))
@@ -209,7 +216,7 @@ def story_view(story: dict, image_eta: float | None = None) -> dict:
         "premise": story["premise"],
         "reading_level": story.get("reading_level") or "early",
         "ended": bool(story.get("ended")),
-        # Always answers: the child's drawing, or the placeholder hero until one is drawn.
-        "hero_url": f"/api/stories/{story['id']}/hero?v={story.get('hero') or 0}",
+        # The hero layer: the child's drawing or a painted hero; None when there is none (background only).
+        "hero_url": hero_url(story),
         "segments": [segment_view(story, seg, image_eta) for seg in story["segments"]],
     }

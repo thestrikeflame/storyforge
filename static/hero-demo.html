@@ -51,7 +51,12 @@
     // A few tiles hold props, as a page's plan can give the hero.
     const props = { waving: ["🍓"], walking: ["🏮"], swimming: ["🐚"], cheering: ["🎈", "⭐"], dancing: ["🎀"] };
     const backgrounds = { swimming: "underwater", flying: "space", sleeping: "village", hiding: "castle", running: "beach", walking: "village" };
-    const hero = new URLSearchParams(location.search).get("hero") || "/static/art/hero-placeholder.png";
+    // Any hero picture: ?hero=/api/stories/<id>/hero ; otherwise a simple doodle drawn right here.
+    const doodle = "data:image/svg+xml," + encodeURIComponent(
+      "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 160'><g fill='none' stroke='#2c2340' stroke-width='6' stroke-linecap='round'>" +
+      "<circle cx='60' cy='45' r='30' fill='#ffd166'/><path d='M60 75v45M60 90l-28 18M60 90l28 18M60 120l-20 32M60 120l20 32'/>" +
+      "<circle cx='50' cy='40' r='3' fill='#2c2340'/><circle cx='70' cy='40' r='3' fill='#2c2340'/><path d='M48 55q12 10 24 0'/></g></svg>");
+    const hero = new URLSearchParams(location.search).get("hero") || doodle;
     const noise = document.getElementById("line-boil-noise");
     window.HeroAnimator.ACTIONS.forEach((action, i) => {
       const tile = document.getElementById("tile").content.firstElementChild.cloneNode(true);

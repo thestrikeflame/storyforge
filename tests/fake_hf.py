@@ -15,6 +15,9 @@ and for the vision models  POST /control {"vision": "..."}:
 It also stands in for ElevenLabs:
     POST /v1/text-to-speech/{voice_id}        answers with a small fake MP3
 and  POST /control {"tts": "..."}:  normal | slow (wait 4 seconds) | error500
+A hero for a story nobody drew (prompt "a child's crayon drawing of ...") gets a little drawing on
+white instead, counted apart from the backgrounds (hero_requests, last_hero_prompt);
+POST /control {"hero": "normal" | "error500"} switches it.
 Only the key "test-token" is accepted (and "test-eleven" for ElevenLabs); anything else gets HTTP 401.
 """
 import base64
@@ -28,8 +31,31 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATE = {"mode": "normal", "requests": 0, "last_prompt": "", "last_path": "", "times": [],
          "vision": "normal", "vision_models": [], "vision_had_image": False,
-         "tts": "normal", "tts_requests": 0, "tts_last": {}, "tts_texts": []}
+         "tts": "normal", "tts_requests": 0, "tts_last": {}, "tts_texts": [],
+         "hero": "normal", "hero_requests": 0, "last_hero_prompt": ""}
 DESCRIPTION = "A round orange cat with a tall green hat and a long striped tail."
+
+
+def drawing_png(size: int = 96) -> bytes:
+    """A child's drawing on white: a dark ring around a white face, and a red body below it."""
+    rows = []
+    for y in range(size):
+        row = bytearray(b"\x00")
+        for x in range(size):
+            d = ((x - size / 2) ** 2 + (y - size / 3) ** 2) ** .5
+            if size * .2 <= d <= size * .26:
+                row += bytes((40, 30, 50))
+            elif abs(x - size / 2) < size * .08 and size * .58 < y < size * .85:
+                row += bytes((230, 80, 60))
+            else:
+                row += bytes((255, 255, 255))
+        rows.append(bytes(row))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(b"".join(rows))) + chunk(b"IEND", b"")
 
 
 def tiny_png(size: int = 48) -> bytes:
@@ -74,6 +100,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.speech(body)
         if not self.path.endswith("/v1/images/generations"):
             return self._json(404, {"error": "not found"})
+        if "child's crayon drawing" in body.get("prompt", ""):
+            STATE["hero_requests"] += 1
+            STATE["last_hero_prompt"] = body["prompt"]
+            if STATE["hero"] == "error500":
+                return self._json(500, {"error": "boom"})
+            return self._json(200, {"created": int(time.time()), "data": [{"b64_json": base64.b64encode(drawing_png()).decode()}]})
         STATE["requests"] += 1
         STATE["last_prompt"] = body.get("prompt", "")
         STATE["last_size"] = body.get("size", "")

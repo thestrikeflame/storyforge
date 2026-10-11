@@ -26,10 +26,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from storyforge import llm, speech, tls_proxy, vision
+from storyforge import hf_images, llm, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
-from storyforge.images import ImageWorker, hero_words, preset_backgrounds, worn_or_about_the_hero
+from storyforge.images import (ImageWorker, cut_out_hero, hero_prompt, hero_words, preset_backgrounds,
+                               worn_or_about_the_hero)
 from storyforge.store import (StoryStore, hero_path, new_segment, new_story, segment_view, story_view,
                               words_pending)
 from storyforge.sysinfo import log, memory_mb, setup_logging, timings
@@ -229,6 +230,8 @@ async def write_segment(story: dict, seg: dict) -> None:
                 await _plan_story(story)
                 if story.get("abandoned"):
                     return
+            if first and not story.get("hero") and not story.get("hero_status"):
+                _start_hero(story)  # nobody drew one: painted in the cloud while page 1 is written
             # This page's step in the quest (the happy ending on the last page).
             seg["beat"] = llm.page_beat(story, seg["index"] + 1, final)
             # A second try only when the reply has no usable page at all (broken, or under 15 words).
@@ -409,6 +412,54 @@ async def write_segment(story: dict, seg: dict) -> None:
     worker.enqueue(story, seg)
     store.save(story)
     _want_definitions(story)
+
+
+HERO_SECONDS = 20  # a painted hero that takes longer is not shown (the pages show their background only)
+hero_tasks: set[asyncio.Task] = set()
+
+
+def _start_hero(story: dict) -> None:
+    """A story started from an idea has no drawing: the cloud model paints its hero (from the
+    outline's kind) as a child's crayon drawing, alongside page 1. Without the cloud there is no hero
+    layer at all."""
+    if settings.image_mode != "huggingface" or not settings.hf_token:
+        story["hero_status"] = "off"
+        return
+    story["hero_status"] = "making"
+    task = asyncio.create_task(_make_hero(story), name=f"hero-{story['id']}")
+    hero_tasks.add(task)
+    task.add_done_callback(hero_tasks.discard)
+
+
+async def _make_hero(story: dict) -> None:
+    kind = (story.get("outline") or {}).get("hero_kind") or "friendly little creature"
+    prompt = hero_prompt(kind)
+    started = time.monotonic()
+    try:
+        data, _ = await asyncio.wait_for(
+            asyncio.to_thread(hf_images.generate, prompt, settings.sd_width, settings.sd_height, story["seed"]),
+            timeout=HERO_SECONDS)
+        png = await asyncio.to_thread(cut_out_hero, data)
+    except (asyncio.TimeoutError, hf_images.HFFailed, ValueError) as exc:
+        story["hero_status"] = "failed"
+        log.warning("hero picture failed  story=%s  kind=%r  %.1fs  (%s); the pages show their background only",
+                    story["id"], kind, time.monotonic() - started,
+                    f"took over {HERO_SECONDS} s" if isinstance(exc, asyncio.TimeoutError) else exc)
+        store.save(story)
+        return
+    if story.get("abandoned"):
+        return
+    path = hero_path(story["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".part")
+    tmp.write_bytes(png)
+    os.replace(tmp, path)
+    story["hero"] = int(time.time())
+    story["hero_source"] = "painted"  # not a child's drawing
+    story["hero_status"] = "ready"
+    log.info("hero picture ready  story=%s  kind=%r  %.1fs  %d bytes  prompt=%r",
+             story["id"], kind, time.monotonic() - started, len(png), prompt)
+    store.save(story)
 
 
 async def _plan_story(story: dict) -> None:
@@ -801,11 +852,12 @@ async def get_image(story_id: str, index: int):
 
 @app.get("/api/stories/{story_id}/hero")
 async def get_hero(story_id: str):
-    """The child's drawing of the hero (a transparent PNG), or the placeholder until /draw exists."""
+    """The hero layer (a transparent PNG): the child's drawing, or one painted for a story started
+    from an idea. 404 when there is none; the pages then show their background only."""
     story = _story_or_404(story_id)
     path = hero_path(story["id"])
     if not story.get("hero") or not path.is_file():
-        path = settings.static_dir / "art" / "hero-placeholder.png"
+        raise HTTPException(404, "This story has no hero picture.")
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
