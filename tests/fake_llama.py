@@ -18,6 +18,8 @@ Tap-a-word definition requests (system prompt about learning new words) are answ
 change the page counters above: the three longest words on the page, plus a word that is not on
 the page and a name, which StoryForge must leave out.
 POST /control {"define_delay": seconds per piece, "define_mode": "normal" | "garbage"}.
+Story outline requests (system prompt about planning adventures) are answered with OUTLINE and
+counted separately too; POST /control {"outline_mode": "garbage"} makes them unusable.
 """
 import json
 import sys
@@ -27,7 +29,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 STATE = {"mode": "normal", "delay": 0.01, "requests": 0, "last_user": "", "last_format": None,
          "ignore_choice": 0, "last_schema": None, "short_pages": 0, "short_words": 8, "cut_off_pages": 0,
          "last_system": "", "define_requests": 0, "define_cancelled": 0, "define_delay": 0.002,
-         "define_mode": "normal", "last_define_user": ""}
+         "define_mode": "normal", "last_define_user": "",
+         "outline_requests": 0, "outline_mode": "normal", "last_outline_user": ""}
+OUTLINE = {
+    "hero_name": "Mira", "hero_kind": "baby dragon",
+    "goal": "find the lost moon pearl and bring it home",
+    "obstacle": "a sleepy river has washed over the stepping stones",
+    "friends": [{"name": "Pim", "kind": "silver moth"}, {"name": "Olo", "kind": "old owl"}],
+    "ending": "Mira returns the moon pearl and the whole wood glows with silver light",
+}
 
 
 def definitions_reply(user_text: str) -> dict:
@@ -91,6 +101,8 @@ def build_reply(user_text: str, event: str | None = None) -> dict:
     reply: dict = {}
     if event:
         reply["event"] = event  # the grammar writes the const first, before anything the model chooses
+    if STATE.get("last_beat"):
+        reply["beat"] = STATE["last_beat"]
     if first:
         reply["title"] = "Mira and the Tenth Mushroom"
     # The page plan comes first: setting, visual_details, action.
@@ -165,6 +177,11 @@ class Handler(BaseHTTPRequestHandler):
         # Recognised by the prompt, not the schema: after "no_schema" StoryForge sends json_object.
         if "learn new words" in body["messages"][0]["content"]:
             return self.definitions(body)
+        if "plan gentle picture-book adventures" in body["messages"][0]["content"]:
+            STATE["outline_requests"] += 1
+            STATE["last_outline_user"] = body["messages"][-1]["content"]
+            text = "not an outline" if STATE["outline_mode"] == "garbage" else json.dumps(OUTLINE)
+            return self.stream_text(text)
         STATE["requests"] += 1
         STATE["last_user"] = body["messages"][-1]["content"]
         STATE["last_system"] = body["messages"][0]["content"]
@@ -172,6 +189,7 @@ class Handler(BaseHTTPRequestHandler):
         schema = ((body.get("response_format") or {}).get("json_schema") or {}).get("schema") or {}
         STATE["last_schema"] = schema
         event = (schema.get("properties") or {}).get("event", {}).get("const")
+        STATE["last_beat"] = (schema.get("properties") or {}).get("beat", {}).get("const")
         if not event:  # no grammar (an old build): a model would still read the prompt's last line
             import re
             found = re.search(r"This page must show: (.+)$", body["messages"][-1]["content"])
@@ -240,7 +258,26 @@ def _definitions(handler, body):
     handler.close_connection = True
 
 
+def _stream_text(handler, text):
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    try:
+        for i in range(0, len(text), 8):
+            chunk = {"choices": [{"delta": {"content": text[i : i + 8]}}]}
+            handler.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
+            handler.wfile.flush()
+            time.sleep(0.002)
+        handler.wfile.write(b'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\ndata: [DONE]\n\n')
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    handler.close_connection = True
+
+
 Handler.definitions = _definitions
+Handler.stream_text = _stream_text
 
 
 if __name__ == "__main__":

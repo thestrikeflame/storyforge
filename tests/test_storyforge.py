@@ -261,7 +261,7 @@ class Parsing(unittest.TestCase):
             self.assertIsNone(_WEAPON.search(text), _WEAPON.search(text) and _WEAPON.search(text).group(0))
         first_user, later_user = prompts(calm)[1], prompts(calm)[3]
         self.assertIn("The hero only holds or uses things that are in these notes.", first_user)
-        self.assertIn("The hero only holds or uses things from how it looks", later_user)
+        self.assertIn("The hero only holds or uses things it already has", later_user)
         # a weapon in the drawing itself: one line, naming it, saying it is a toy or a tool
         armed = prompts("a green dragon with a horn and a wooden sword with a yellow handle")
         for user in (armed[1], armed[3]):
@@ -513,6 +513,57 @@ class Parsing(unittest.TestCase):
         self.assertIn("a pre-reader aged 3 to 5", prompt)
         self.assertEqual(llm.definition_schema()["properties"]["words"]["maxItems"], 4)
 
+    def test_outline_beats_and_the_hero_line(self):
+        from storyforge import llm
+        story = {"premise": "a crab looks for treasure", "segments": [], "reading_level": "early",
+                 "hero_description": "a small red crab with big blue claws and a striped shell"}
+        raw = json.dumps({"hero_name": "Crabby", "hero_kind": "crab", "goal": "find the lost moon pearl",
+                          "obstacle": "a sleepy wave covers the cave", "ending": "Crabby brings the pearl home",
+                          "friends": [{"name": "Pip", "kind": "seagull"}, {"name": "Crabby", "kind": "crab"}]})
+        story["outline"] = outline = llm.parse_outline(raw, story)
+        self.assertEqual(outline["pages"], 6)
+        self.assertEqual(outline["friends"], [{"name": "Pip", "kind": "seagull"}])  # the hero is not its own friend
+        with self.assertRaises(llm.WriterFailed):
+            llm.parse_outline('{"obstacle": "x"}', story)
+        story["hero_name"] = "Crabby"
+        self.assertEqual(llm.hero_name_kind(story), ("Crabby", "a crab"))
+        beats = [llm.page_beat(story, n, final=n == 6) for n in range(1, 7)]
+        self.assertIn("find the lost moon pearl", beats[0])
+        self.assertIn("meets Pip (seagull)", beats[1])
+        self.assertIn("clue", beats[2])
+        self.assertIn("a sleepy wave covers the cave", beats[3])
+        self.assertIn("solves the problem", beats[4])
+        self.assertIn("The happy ending: Crabby brings the pearl home", beats[5])
+        self.assertIn("happy ending", llm.page_beat(story, 2, final=True))  # "Finish the story" early
+        # page 1 still gets the drawing's notes; later pages only "Crabby, a crab", never its looks
+        first = llm.build_messages(story, None, False)[1]["content"]
+        self.assertIn("big blue claws", first)
+        self.assertIn("The quest: find the lost moon pearl", first)
+        story["segments"] = [{"status": "ready", "setting": "a beach", "text": "x"}]
+        story["character_look"] = "a small red crab with big blue claws"
+        later = llm.build_messages(story, "Sail to the island", False, event="Sail to the island")[1]["content"]
+        self.assertIn("The hero: Crabby, a crab. Never describe what Crabby looks like", later)
+        self.assertNotIn("claws", later)
+        self.assertNotIn("striped", later)
+        self.assertIn("This page's beat: Crabby sets off on the quest and meets Pip (seagull)", later)
+        self.assertIn("Write page 2 of 6 only", later)
+        self.assertEqual(list(llm.response_schema(False, False, event="e", beat="b")["properties"])[:3],
+                         ["event", "beat", "setting"])
+        # a pre-reader story is 4 pages; its middle beats combine steps
+        pre = dict(story, reading_level="pre", outline=dict(outline, pages=4))
+        self.assertIn("together they find a clue", llm.page_beat(pre, 2, final=False))
+        self.assertIn("solve it together", llm.page_beat(pre, 3, final=False))
+
+    def test_choices_are_forks_not_small_actions(self):
+        from storyforge import llm
+        raw = json.dumps({"setting": "a reef", "visual_details": ["a", "b"], "props": [], "action": "swimming",
+                          "segment": " ".join(["word"] * 50), "visual_prompt": "v", "continuity_summary": "s",
+                          "choices": ["Look closer at the shell", "Sail to the singing island", "Ask the old turtle for help"]})
+        page = llm.parse_page(raw, first=False, final=False)
+        self.assertEqual(page.choices, ["Sail to the singing island", "Ask the old turtle for help"])
+        schema = llm.response_schema(False, False)["properties"]["choices"]
+        self.assertEqual((schema["minItems"], schema["maxItems"]), (2, 3))
+
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
         long_page = "word " * 400
@@ -598,10 +649,11 @@ class Flow(unittest.TestCase):
         self.assertNotIn("ten. The tenth mushroom", sent)
         self.assertTrue(sent.endswith("This page must show: Open the tiny wooden door"))  # the choice comes last
         schema = call("GET", f"{LLM}/state")[1]["last_schema"]
-        self.assertEqual(list(schema["properties"])[:2], ["event", "setting"])  # ...and opens the plan
+        self.assertEqual(list(schema["properties"])[:3], ["event", "beat", "setting"])  # ...and opens the plan, with the beat
         self.assertEqual(schema["properties"]["event"]["const"], "Open the tiny wooden door")
         self.assertIn("Mira chose to open the tiny wooden door", second["text"])
-        self.assertIn("purple baby dragon", sent)               # the character's look
+        self.assertNotIn("purple baby dragon", sent)            # never the character's look after page 1...
+        self.assertIn("The hero: Mira, a baby dragon.", sent)   # ...only its name and kind
         # custom idea, then plain continue, then the ending
         call("POST", f"{BASE}/api/stories/{story_id}/continue",
              {"kind": "custom", "action": "Mira sneezes sparkles and the jars wake up", "after": 1})
@@ -799,7 +851,7 @@ class Flow(unittest.TestCase):
         call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "choice", "action": "Climb the tallest oak tree", "after": 1})
         page = wait_ready(story_id, 2)
         self.assertEqual(call("GET", f"{LLM}/state")[1]["requests"] - before, 1)
-        self.assertTrue(page["text"].startswith("So our hero decided to climb the tallest oak tree. "), page["text"][:80])
+        self.assertTrue(page["text"].startswith("So Mira decided to climb the tallest oak tree. "), page["text"][:80])
         self.assertIn("result=bridged", log_file.read_text())
         self.assertRegex(log_file.read_text(), r"page check failed  story=\w+ page=3  check=choice  choice='Climb the tallest oak tree'")
         # a scary choice is made gentle before the storyteller sees it
@@ -838,7 +890,7 @@ class Flow(unittest.TestCase):
         page = wait_ready(story_id, 3)
         self.assertEqual(call("GET", f"{LLM}/state")[1]["requests"] - before, 2)
         self.assertEqual(page["status"], "ready")
-        self.assertTrue(page["text"].startswith("So our hero decided to climb the tallest oak tree. "), page["text"])
+        self.assertTrue(page["text"].startswith("So Mira decided to climb the tallest oak tree. "), page["text"])
         self.assertGreaterEqual(len(page["choices"]), 2)
         self.assertIn("kept the longest text", log_file.read_text())
         # no text at all from either try: only then the friendly error (test_06 has the garbage case)
@@ -1116,8 +1168,9 @@ class DrawnHero(unittest.TestCase):
         call("POST", f"{CLOUD}/api/stories/{story['id']}/continue", {"kind": "continue", "after": 0})
         wait_ready(story["id"], 1, CLOUD)
         later_prompt = call("GET", f"{LLM}/state")[1]["last_user"]
-        self.assertIn("Main character's name: Captain Whiskers", later_prompt)
-        self.assertIn(f"Main character looks like: {description}", later_prompt)
+        self.assertIn("The hero: Captain Whiskers, a baby dragon. Never describe what Captain Whiskers looks like", later_prompt)
+        self.assertNotIn(description, later_prompt)  # the hero's looks are only for page 1
+        self.assertNotIn("Main character looks like", later_prompt)
         self.assertEqual(json.loads((TMP / "cloud_data" / "sessions" / f"{story['id']}.json").read_text())["hero_name"],
                          "Captain Whiskers")
 
@@ -1192,6 +1245,55 @@ def define_mode(**values) -> None:
 
 def llm_state() -> dict:
     return call("GET", f"{LLM}/state")[1]
+
+
+class StoryPlot(unittest.TestCase):
+    """A choose-your-own-adventure plot: an outline when the story starts, a beat per page, and an
+    ending on time (Pre-reader 4 pages)."""
+
+    def setUp(self):
+        llm_mode("normal")
+        call("POST", f"{LLM}/control", {"outline_mode": "normal"})
+
+    def test_1_a_pre_reader_story_is_planned_and_ends_on_page_4(self):
+        before = llm_state()["outline_requests"]
+        status, story = call("POST", f"{BASE}/api/stories", {"premise": "a baby dragon and the moon", "reading_level": "pre"})
+        story_id = story["id"]
+        wait_ready(story_id, 0)
+        self.assertEqual(llm_state()["outline_requests"], before + 1)
+        self.assertIn("a 4-page picture-book story", llm_state()["last_outline_user"])
+        saved = json.loads((TMP / "data" / "sessions" / f"{story_id}.json").read_text())
+        self.assertEqual(saved["outline"]["goal"], "find the lost moon pearl and bring it home")
+        self.assertEqual(saved["outline"]["pages"], 4)
+        self.assertEqual(saved["hero_name"], "Mira")
+        self.assertIn("The quest: find the lost moon pearl", llm_state()["last_user"])
+        for n in (1, 2, 3):
+            call("POST", f"{BASE}/api/stories/{story_id}/continue",
+                 {"kind": "choice", "action": "Fly over the silver river", "after": n - 1})
+            page = wait_ready(story_id, n)
+        sent = llm_state()["last_user"]
+        self.assertIn("the LAST page", sent)
+        self.assertIn("This page's beat: The happy ending: Mira returns the moon pearl", sent)
+        self.assertTrue(page["final"])
+        self.assertEqual(page["choices"], [])
+        status, body = call("GET", f"{BASE}/api/stories/{story_id}")
+        self.assertTrue(body["ended"])
+        saved = json.loads((TMP / "data" / "sessions" / f"{story_id}.json").read_text())
+        self.assertEqual([s["beat"].split(":")[0].split()[0] for s in saved["segments"]], ["Show", "Mira", "The", "The"])
+        status, _ = call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "after": 3})
+        self.assertEqual(status, 409)  # the story has ended
+        rows = (TMP / "logs" / "storyforge.log").read_text()
+        self.assertIn(f"outline ready  story={story_id}", rows)
+        self.assertRegex(rows, rf"page beat  story={story_id} page=4  beat='The happy ending: .*'  \(last page\)")
+
+    def test_2_without_an_outline_the_story_still_gets_written(self):
+        call("POST", f"{LLM}/control", {"outline_mode": "garbage"})
+        story_id = new_story()
+        page = wait_ready(story_id, 0)
+        self.assertTrue(page["text"])
+        saved = json.loads((TMP / "data" / "sessions" / f"{story_id}.json").read_text())
+        self.assertTrue(saved["outline"]["fallback"])
+        self.assertEqual(saved["outline"]["pages"], 6)
 
 
 class ReadingLevelsAndWords(unittest.TestCase):

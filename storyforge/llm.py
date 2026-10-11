@@ -100,8 +100,10 @@ _COMMON_KEYS = (
     "like, never its name), doing ONE thing, in ONE place. Simple and concrete, no feelings.\n"
 )
 _CHOICES_KEY = (
-    '"choices": a list of exactly 3 different things the reader could make happen next. '
-    "Each is at most 9 words and starts with a verb.\n"
+    '"choices": a list of 2 or 3 choices for what the hero does next. Each is a real fork in the '
+    "quest: a different place to go, or a different decision about how to reach the goal, so each "
+    "leads to a different next page. Never a small action like looking, waiting or listening. Each "
+    "is one short, exciting sentence of at most 10 words that starts with a verb.\n"
 )
 _SUMMARY_KEY = (
     '"continuity_summary": at most 60 words holding everything worth remembering so far: '
@@ -286,6 +288,162 @@ def hero_notes(description: str) -> tuple[str, list[str]]:
     return kind.strip(" ,.") or text, features[:3]
 
 
+# --------------------------------------------------------------------------
+# The story outline and each page's beat (a choose-your-own-adventure plot)
+# --------------------------------------------------------------------------
+# One call when a story starts plans its quest: a goal, a problem in the way, one or two friends and
+# the happy ending to steer toward. Every page then gets a beat from a fixed ladder, filled in from the
+# outline, so the story moves forward page by page and ends on time (Pre-reader 4 pages, else 6).
+
+OUTLINE_SYSTEM = (
+    "You plan gentle picture-book adventures for young children. Nobody is ever hurt, attacked or "
+    "fought, and nothing is scary. Reply with one JSON object only, no other text."
+)
+OUTLINE_MAX_TOKENS = 220
+
+
+def planned_pages(story: dict) -> int:
+    outline = story.get("outline") or {}
+    return int(outline.get("pages") or (4 if reading_level(story).key == "pre" else 6))
+
+
+def build_outline_messages(story: dict) -> list[dict]:
+    hero = story.get("hero_description")
+    who = story.get("hero_who")
+    pages = 4 if reading_level(story).key == "pre" else 6
+    hero_line = ""
+    if who:
+        hero_line = f'The reader calls the hero "{who}": use that name and kind of character.\n'
+    elif hero:
+        hero_line = f"The hero is a character the reader drew: {hero_notes(hero)[0]}.\n"
+    user = (
+        f"The reader's idea for a {pages}-page picture-book story:\n\"{story['premise']}\"\n"
+        + hero_line +
+        "Plan the story's quest. Use these JSON keys in this order:\n"
+        '"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n'
+        '"hero_kind": what kind of character the hero is, 1 to 3 words, with no colours or looks.\n'
+        '"goal": the quest: one special thing the hero wants to find, reach, make or help with, in at most 15 words.\n'
+        '"obstacle": the gentle problem in the way, in at most 15 words. Nobody is mean or hurt.\n'
+        '"friends": a list of 1 or 2 friends the hero meets, each with "name" (1 or 2 words) and "kind" (1 to 3 words).\n'
+        '"ending": the happy ending, in at most 20 words: the quest is completed.'
+    )
+    return [{"role": "system", "content": OUTLINE_SYSTEM}, {"role": "user", "content": user}]
+
+
+def outline_schema() -> dict:
+    friend = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "kind": {"type": "string"}},
+        "required": ["name", "kind"], "additionalProperties": False,
+    }
+    props = {
+        "hero_name": {"type": "string"},
+        "hero_kind": {"type": "string"},
+        "goal": {"type": "string"},
+        "obstacle": {"type": "string"},
+        "friends": {"type": "array", "items": friend, "minItems": 1, "maxItems": 2},
+        "ending": {"type": "string"},
+    }
+    return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
+
+
+def _short(value, words: int) -> str:
+    text = clean_line(str(value or ""), 200).strip(" .")
+    return " ".join(text.split()[:words])
+
+
+def parse_outline(raw: str, story: dict) -> dict:
+    """The model's outline, trimmed and checked. Raises WriterFailed when the quest is missing."""
+    data = _loads_lenient(raw)
+    if not isinstance(data, dict):
+        raise WriterFailed("no outline in the reply")
+    goal, obstacle, ending = _short(data.get("goal"), 18), _short(data.get("obstacle"), 18), _short(data.get("ending"), 24)
+    if not goal or not ending:
+        raise WriterFailed("the outline has no goal or no ending")
+    hero_name = _short(data.get("hero_name"), 3).strip("\"'") or ""
+    friends = []
+    for item in data.get("friends") or []:
+        if not isinstance(item, dict):
+            continue
+        name, kind = _short(item.get("name"), 2).strip("\"'"), _short(item.get("kind"), 3)
+        if name and name.lower() != hero_name.lower() and name.lower() not in {f["name"].lower() for f in friends}:
+            friends.append({"name": name, "kind": kind or "friend"})
+    return {
+        "hero_name": hero_name,
+        "hero_kind": _short(data.get("hero_kind"), 3) or "",
+        "goal": goal,
+        "obstacle": obstacle or "something tricky is in the way",
+        "friends": friends[:2],
+        "ending": ending,
+        "pages": 4 if reading_level(story).key == "pre" else 6,
+    }
+
+
+def fallback_outline(story: dict) -> dict:
+    """When the outline call fails: a plain quest, so the pages still have beats to follow."""
+    return {
+        "hero_name": "", "hero_kind": "", "goal": "a special adventure from the reader's idea",
+        "obstacle": "something tricky is in the way", "friends": [],
+        "ending": "the adventure ends happily and everyone celebrates together",
+        "pages": 4 if reading_level(story).key == "pre" else 6, "fallback": True,
+    }
+
+
+def hero_name_kind(story: dict) -> tuple[str, str]:
+    """(name, kind) for every page after page 1: "Crabby", "a crab". Never any looks."""
+    outline = story.get("outline") or {}
+    name = story.get("hero_name") or outline.get("hero_name") or "the hero"
+    kind = outline.get("hero_kind") or ""
+    if not kind:
+        look = story.get("hero_description") or story.get("character_look") or ""
+        kind = hero_notes(look)[0].split()[-1] if look else ""
+    kind = kind.strip(" .")
+    if kind and not re.match(r"(?i)(a|an|the)\s", kind):
+        kind = f"{'an' if kind[0].lower() in 'aeiou' else 'a'} {kind}"
+    return name, kind
+
+
+_LADDER = {
+    4: ("begin", "meet_clue", "obstacle_solve", "ending"),
+    6: ("begin", "meet", "clue", "obstacle", "solve", "ending"),
+}
+
+
+def page_beat(story: dict, page_number: int, final: bool) -> str:
+    """What must happen on this page to move the quest forward (the ending on the last page)."""
+    outline = story.get("outline") or fallback_outline(story)
+    name, _ = hero_name_kind(story)
+    friends = outline.get("friends") or []
+    first = f"{friends[0]['name']} ({friends[0]['kind']})" if friends else "a new friend"
+    helper = friends[-1]["name"] if friends else "a new friend"
+    ladder = _LADDER[4 if planned_pages(story) <= 4 else 6]
+    stage = "ending" if final else ladder[min(page_number - 1, len(ladder) - 2)]
+    goal, obstacle, ending = outline["goal"], outline["obstacle"], outline["ending"]
+    return {
+        "begin": f"Show {name} at home and how the quest begins: {goal}. End with {name} ready to set off.",
+        "meet": f"{name} sets off on the quest and meets {first}, who wants to help.",
+        "clue": f"{name} and {friends[0]['name'] if friends else 'a friend'} discover a clue that shows the way to the goal.",
+        "meet_clue": f"{name} meets {first}, and together they find a clue that shows the way.",
+        "obstacle": f"The problem gets in the way: {obstacle}. {name} must find a way past it.",
+        "obstacle_solve": f"The problem gets in the way: {obstacle}. {name} and {helper} solve it together, kindly.",
+        "solve": f"{name} solves the problem in a clever, kind way, with help from {helper}.",
+        "ending": f"The happy ending: {ending}. The quest is complete and everyone celebrates.",
+    }[stage]
+
+
+def _outline_lines(story: dict) -> str:
+    outline = story.get("outline") or {}
+    if not outline:
+        return ""
+    friends = ", ".join(f"{f['name']} ({f['kind']})" for f in outline.get("friends") or [])
+    return (
+        f"The quest: {outline['goal']}\n"
+        f"The problem in the way: {outline['obstacle']}\n"
+        + (f"Friends in this story: {friends}\n" if friends else "")
+        + f"The happy ending to steer toward: {outline['ending']}\n"
+    )
+
+
 def build_messages(story: dict, action: str | None, final: bool, event: str | None = None) -> list[dict]:
     """Build the chat messages for the next page. Sends a compact summary plus only the
     most recent page, never the whole history, so the 2048-token context is not exceeded."""
@@ -293,6 +451,9 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
     system = SYSTEM_PROMPT.format(reader=level.style, min_words=level.min_words, max_words=level.max_words)
     ready = [s for s in story["segments"] if s["status"] == "ready"]
     page_number = len(ready) + 1
+    pages = planned_pages(story)
+    beat = page_beat(story, page_number, final)
+    outline = story.get("outline") or {}
 
     if not ready:
         hero = story.get("hero_description")
@@ -305,18 +466,25 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
                  "character they gave, even where the notes below differ.\n" if who else "")
                 + f"The hero is a character the reader drew: {kind}."
                 + (f" Notes: {'; '.join(features)}." if features else "")
-                + " Make it the main character. Choose its name in \"hero_name\" and begin the page with "
-                "that name. Tell what the hero does, in fresh story words; never list its looks in one "
+                + " Make it the main character. "
+                + (f'Its name is {outline["hero_name"]}: write that in "hero_name" ' if outline.get("hero_name")
+                   else 'Choose its name in "hero_name" ')
+                + "and begin the page with that name. Tell what the hero does, in fresh story words; never list its looks in one "
                 "long sentence. Mention one of the notes naturally, later in the page. The hero only holds "
                 "or uses things that are in these notes.\n"
                 + weapon_rule(f"{hero} {who or ''}") + "\n"
             )
+        name_line = (f"The hero's name: {outline['hero_name']}\n"
+                     if outline.get("hero_name") and not hero else "")
         user = (
             f"The reader's idea for the story:\n\"{story['premise']}\"\n\n"
-            + hero_line +
-            "Write page 1 only. Introduce the main character and the place, and end on a moment "
-            "of curiosity so the reader wants to decide what happens next. Do not resolve anything.\n\n"
+            + hero_line + name_line + _outline_lines(story) +
+            f"The story has {pages} pages.\n\n"
+            "Write page 1 only. Introduce the main character and the place, show the quest beginning, "
+            "and end on a moment where the reader decides how to start. Do not resolve anything.\n"
+            f"This page's beat: {beat}\n\n"
             "Use these JSON keys in this order:\n"
+            '"beat": (already filled in: this page\'s beat.)\n'
             '"title": a title for the story, at most 6 words.\n'
             + _PLAN_KEYS
             + ('"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n' if hero else "") +
@@ -330,27 +498,33 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
     else:
         # Only a short summary: the previous page's text would drown out the reader's choice (which a
         # small model then ignores), and its last sentence tempted it to retell how that page ended.
+        name, kind = hero_name_kind(story)
         if final:
             task = (
-                f"Write page {page_number}, the LAST page. Bring the story to a warm, satisfying "
+                f"Write page {page_number}, the LAST page. Wrap up the quest with a happy, satisfying "
                 'ending that fits everything so far. "choices" must be an empty list [].'
             )
             choices_key = '"choices": [].\n'
         else:
+            near_end = page_number >= pages - 1
             task = (
-                f"Write page {page_number} only. Show what happens because of the reader's decision, "
-                "move the story forward with something new, and end on a moment where the reader "
-                "could decide what happens next. Do not end the story."
+                f"Write page {page_number}{f' of {pages}' if page_number <= pages else ''} only. "
+                "Show what happens because of the reader's "
+                "decision and move the quest forward with this page's beat, then end on a moment where "
+                "the reader decides what happens next. Do not end the story."
+                + (" The story ends on the next page, so lead toward the happy ending." if near_end else "")
             )
             choices_key = _CHOICES_KEY
         decision = action or "Continue the adventure in the most natural way."
         user = (
             f"Story title: {story.get('title') or 'Untitled'}\n"
             f"The reader's original idea: \"{story['premise']}\"\n"
-            + (f"Main character's name: {story['hero_name']}\n" if story.get("hero_name") else "")
+            # Only the hero's name and kind after page 1: never its looks, which the model retold.
+            + f"The hero: {name}{', ' + kind if kind else ''}. Never describe what {name} looks like "
+            "(no colours, size, body or clothes): the reader already knows.\n"
             + (f'The reader calls the hero: "{story["hero_who"]}"\n' if story.get("hero_who") else "")
-            + f"Main character looks like: {story.get('character_look') or 'not described yet'}\n"
-            + ("The hero only holds or uses things from how it looks, or things it finds in the story.\n"
+            + _outline_lines(story)
+            + ("The hero only holds or uses things it already has, or things it finds in the story.\n"
                + weapon_rule(f"{story['hero_description']} {story.get('hero_who') or ''}")
                if story.get("hero_description") else "")
             +
@@ -361,12 +535,14 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             +
             f"Story so far: {short_summary(story.get('summary')) or 'the story has just begun'}\n\n"
             f"The reader decided: \"{decision}\"\n\n"
-            f"{task}\n\n"
+            f"{task}\n"
+            f"This page's beat: {beat}\n\n"
             "Use these JSON keys in this order:\n"
             + (f'"event": "{event}" (already filled in: the reader\'s choice. The setting, details, '
                "action and the whole page follow from it.)\n"
                f'The "setting" is where this event happens: if it goes somewhere new, that new place. '
                f'The "action" is what the hero does in this event.\n' if event else "")
+            + '"beat": (already filled in: this page\'s beat. The page shows it happening.)\n'
             + _PLAN_KEYS +
             f'"segment": the text of page {page_number}, written from the plan above: '
             f'{level.min_words} to {level.max_words} words in one or two short paragraphs.\n'
@@ -377,13 +553,17 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def response_schema(first: bool, final: bool, drawn_hero: bool = False, event: str | None = None) -> dict:
+def response_schema(first: bool, final: bool, drawn_hero: bool = False, event: str | None = None,
+                    beat: str | None = None) -> dict:
     """JSON schema handed to llama-server so its grammar forces well-formed output.
-    `event` (the reader's choice) is a constant first property: the grammar writes it into the plan
-    before the model plans the setting and action, so the plan starts from the choice."""
+    `event` (the reader's choice) and `beat` (this page's step in the quest) are constant first
+    properties: the grammar writes them into the plan before the model plans the setting and action,
+    so the plan starts from the choice and the plot."""
     props: dict = {}
     if event:
         props["event"] = {"type": "string", "const": event}
+    if beat:
+        props["beat"] = {"type": "string", "const": beat}
     if first:
         props["title"] = {"type": "string"}
     props["setting"] = {"type": "string"}
@@ -397,8 +577,8 @@ def response_schema(first: bool, final: bool, drawn_hero: bool = False, event: s
         props["character_look"] = {"type": "string"}
         props["world"] = {"type": "string"}
     props["visual_prompt"] = {"type": "string"}
-    count = 0 if final else 3
-    props["choices"] = {"type": "array", "items": {"type": "string"}, "minItems": count, "maxItems": count}
+    props["choices"] = {"type": "array", "items": {"type": "string"},
+                        "minItems": 0 if final else 2, "maxItems": 0 if final else 3}
     props["continuity_summary"] = {"type": "string"}
     return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
 
@@ -824,6 +1004,10 @@ def _loads_lenient(raw: str) -> dict | None:
     return None
 
 
+SMALL_ACTIONS = frozenset("""
+    look looks peek peer gaze stare watch listen wait stay rest sit smile think wonder pause
+""".split())
+
 FALLBACK_CHOICES = (
     "Look more closely at what is nearby",
     "Call out and see who answers",
@@ -913,6 +1097,12 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
             if len(choices) == 4:
                 break
     used_fallback = False
+    # Choices are forks in the quest; small actions ("Look closer", "Wait and listen") are dropped
+    # while at least two real ones remain.
+    forks = [c for c in choices if c.split()[0].lower() not in SMALL_ACTIONS]
+    if len(forks) >= 2:
+        choices = forks
+    choices = choices[:3]
     if not final and len(choices) < 2:
         used_fallback = True
         choices = (choices + [c for c in FALLBACK_CHOICES if c.lower() not in {x.lower() for x in choices}])[:3]
