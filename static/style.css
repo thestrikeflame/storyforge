@@ -878,6 +878,10 @@ textarea:focus, .own-idea input:focus { border-color: var(--rust); outline: none
   outline: none;
 }
 .words p { margin: 0 0 .8em; text-wrap: pretty; }
+/* Pre-readers: bigger text and more room between lines; every word can be tapped to hear it. */
+.words.level-pre { font-size: clamp(1.45rem, .8rem + 1.4dvh, 1.75rem); line-height: 1.95; }
+.words .say { cursor: pointer; border-radius: 5px; -webkit-tap-highlight-color: transparent; }
+.words .say:hover, .words .say.saying { background: #e3f1ff; }
 .words p:last-child { margin-bottom: 0; }
 .words.opening p:first-child::first-letter {
   float: left;
@@ -935,6 +939,8 @@ textarea:focus, .own-idea input:focus { border-color: var(--rust); outline: none
   animation: settingsPop .25s cubic-bezier(.2, .9, .3, 1.2);
 }
 .word-bubble p { margin: 0; }
+.word-bubble .word-bubble-emoji { font-size: 1.3em; }
+.word-bubble .word-bubble-example { margin-top: .35em; font-style: italic; font-weight: 500; }
 .word-bubble strong { font-family: var(--titles); font-weight: 400; font-size: 1.15em; color: #b4472d; }
 @media (prefers-reduced-motion: reduce) { .word-bubble { animation: none; } }
 

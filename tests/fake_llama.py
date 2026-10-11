@@ -15,8 +15,8 @@ POST /control {"short_pages": n, "short_words": k} makes the next n pages only k
 POST /control {"cut_off_pages": n} cuts the next n replies off a few words into the page text,
 with finish_reason "length", as if the token limit was hit.
 Tap-a-word definition requests (system prompt about learning new words) are answered separately and never
-change the page counters above: the three longest words on the page, plus a word that is not on
-the page and a name, which StoryForge must leave out.
+change the page counters above: a definition for each word in the schema (the words StoryForge
+chose), plus a word it did not ask for, which StoryForge must leave out.
 POST /control {"define_delay": seconds per piece, "define_mode": "normal" | "garbage"}.
 Story outline requests (system prompt about planning adventures) are answered with OUTLINE and
 counted separately too; POST /control {"outline_mode": "garbage"} makes them unusable.
@@ -42,15 +42,30 @@ OUTLINE = {
 }
 
 
-def definitions_reply(user_text: str) -> dict:
+def definitions_reply(schema: dict, user_text: str) -> dict:
+    """A definition for each word StoryForge chose (the schema's keys, or the prompt's list when an
+    older build gets no schema), with the fields the level asks for, plus a word it did not ask for,
+    which StoryForge must leave out."""
     import re
-    page = user_text.split('"""')[1] if user_text.count('"""') >= 2 else user_text
-    words = sorted({w for w in re.findall(r"[A-Za-z]+", page) if w.islower()}, key=lambda w: (-len(w), w))[:3]
-    items = [{"word": w, "definition": f"a {w} is a thing in the story. More words here."} for w in words]
-    items.append({"word": "zeppelin", "definition": "a big airship"})  # not on the page
-    if "Mira" in page:
-        items.insert(0, {"word": "Mira", "definition": "the little dragon"})  # a name
-    return {"words": items[:4]}
+    entries = ((schema.get("properties") or {}).get("words") or {}).get("properties") or {}
+    if not entries:
+        listed = re.search(r"Define these words from the page: (.*?)\. Say", user_text)
+        fields = {"definition": {}}
+        if "one emoji" in user_text:
+            fields["emoji"] = {}
+        if "tiny example" in user_text:
+            fields["example"] = {}
+        entries = {w: {"properties": fields} for w in re.findall(r'"([^"]+)"', listed.group(1) if listed else "")}
+    words = {}
+    for word, item in entries.items():
+        fields = item.get("properties") or {}
+        words[word] = {"definition": f"a thing in the story called {word}. More words here."}
+        if "emoji" in fields:
+            words[word]["emoji"] = "🌟"
+        if "example" in fields:
+            words[word]["example"] = f"We saw the {word} today."
+    words["zeppelin"] = {"definition": "a big airship"}  # not asked for
+    return {"words": words}
 
 PAGES = [
     "Mira was a small purple dragon, no bigger than a watering can, and she lived at the edge of the Whispering Wood. "
@@ -245,7 +260,8 @@ def _definitions(handler, body):
     if STATE["define_mode"] == "garbage":
         text = "Sorry, I can't help with words today."
     else:
-        text = json.dumps(definitions_reply(STATE["last_define_user"]))
+        schema = ((body.get("response_format") or {}).get("json_schema") or {}).get("schema") or {}
+        text = json.dumps(definitions_reply(schema, STATE["last_define_user"]))
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
     handler.send_header("Connection", "close")

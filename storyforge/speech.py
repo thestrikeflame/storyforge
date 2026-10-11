@@ -159,7 +159,7 @@ class Narrator:
         return path if path.is_file() else None
 
     async def _synthesize_word(self, word: str, definition: str, speed: float, path: Path) -> None:
-        line = " ".join(f"{word}. {definition}".split())
+        line = " ".join(f"{word}. {definition}".split()).strip()  # no definition: the word alone
         started = time.monotonic()
         try:
             audio, credits = await asyncio.to_thread(elevenlabs.synthesize, line, speed)

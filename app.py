@@ -15,6 +15,7 @@ import asyncio
 import base64
 import binascii
 import os
+import re
 import struct
 import time
 from contextlib import asynccontextmanager
@@ -26,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from storyforge import hf_images, llm, speech, tls_proxy, vision
+from storyforge import hf_images, llm, reading, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
 from storyforge.images import (ImageWorker, cut_out_hero, hero_prompt, hero_words, preset_backgrounds,
@@ -127,7 +128,7 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
         shown = llm.drop_repeats(cleaned, check["earlier"], finished_only=True)[0]
         if check.get("looks"):
             shown = llm.drop_hero_looks(shown, *check["looks"], finished_only=True)[0]
-        seg["partial"] = llm.tidy_page(shown, check["max_words"])[0]
+        seg["partial"] = llm.tidy_page(shown, check["max_words"], split_over=check["split_over"])[0]
         return
     cleaned, dropped = llm.drop_repeats(cleaned, check["earlier"], floor=llm.minimum_words())
     seg["repeats_dropped"] = dropped
@@ -147,7 +148,7 @@ def _final_touches(seg: dict, text: str, check: dict) -> str:
     maximum), and on the last page the quest's goal (a closing sentence when the page missed it)."""
     if check.get("looks"):
         text, seg["looks_dropped"] = llm.drop_hero_looks(text, *check["looks"], floor=llm.minimum_words())
-    text, notes = llm.tidy_page(text, 10_000, floor=llm.minimum_words())
+    text, notes = llm.tidy_page(text, 10_000, floor=llm.minimum_words(), split_over=check["split_over"])
     seg["gentle_fixed"] = notes["gentle"]
     if check["event"]:
         if llm.choice_followed(check["event"], text, check["known"]):
@@ -238,13 +239,15 @@ async def write_segment(story: dict, seg: dict) -> None:
             for attempt in (1, 2):
                 check = {"event": event, "known": known, "hero": story.get("hero_name"), "earlier": earlier,
                          "max_words": level.max_words,
+                         # pre-readers: sentences over 10 words are split (while streaming too)
+                         "split_over": reading.PRE_SPLIT_OVER if level.key == "pre" else 0,
                          # pages 2+: sentences re-describing the hero are dropped
                          "looks": (llm.hero_stems(story), llm.hero_feature_words(story)) if not first else None,
                          "goal": (story.get("outline") or {}).get("goal_done") if final else None}
                 stream = llm.LLMStream(
                     messages=llm.build_messages(story, seg["action"], final, event=event),
                     schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description")), event=event,
-                                               beat=seg["beat"]),
+                                               beat=seg["beat"], choices=level.choices),
                     temperature=settings.llm_temperature if attempt == 1 else 0.5,
                     max_tokens=settings.llm_max_tokens + level.extra_tokens,
                 )
@@ -273,7 +276,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                         continue
                 _update_partial(story, seg, stream, started, check)
                 try:
-                    page = llm.parse_page(raw, first, final, earlier_pages=earlier)
+                    page = llm.parse_page(raw, first, final, earlier_pages=earlier, max_choices=level.choices)
                     if not seg["text_complete"]:
                         seg["repeats_dropped"] = page.repeats_dropped
                         page.segment = _final_touches(seg, page.segment, check)
@@ -283,7 +286,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                         # Narration may already be playing this text, so keep it and fill in the rest.
                         page = llm.Page(
                             segment=seg["text"], visual_prompt=llm.clean_line(seg["text"].split(".")[0], 200),
-                            choices=[] if final else list(llm.FALLBACK_CHOICES), summary="",
+                            choices=[] if final else list(llm.FALLBACK_CHOICES)[:level.choices], summary="",
                             used_fallback_choices=not final, repaired=True,
                         )
                         break
@@ -305,7 +308,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                             where, llm.word_count(text))
                 page = llm.Page(
                     segment=text, visual_prompt=llm.clean_line(text.split(".")[0], 200),
-                    choices=[] if final else list(llm.FALLBACK_CHOICES), summary="",
+                    choices=[] if final else list(llm.FALLBACK_CHOICES)[:level.choices], summary="",
                     used_fallback_choices=not final, repaired=True,
                 )
     except asyncio.CancelledError:
@@ -377,6 +380,15 @@ async def write_segment(story: dict, seg: dict) -> None:
     if seg.get("goal_check") == "added":
         log.warning("page check failed  %s  check=goal  (closing sentence added: %r)", where,
                     llm.goal_sentence(story["outline"]["goal_done"]))
+    # How hard the page reads, measured (textstat), against the level's targets.
+    seg["reading"] = reading.measure(seg["text"], level.key)
+    m = seg["reading"]
+    log.info("page reading level  %s  level=%s  grade=%.1f (target %s)  avg_sentence=%.1f words  longest=%d "
+             "(limit %d)  sentences=%d  words=%d  %s", where, level.key, m["grade"], m["grade_target"],
+             m["avg_sentence_words"], m["longest_sentence_words"], m["sentence_limit"], m["sentences"],
+             llm.word_count(seg["text"]), "on target" if m["on_target"] else "OFF TARGET")
+    timings.record("reading_level", level=level.key, grade=m["grade"], avg_sentence_words=m["avg_sentence_words"],
+                   longest_sentence_words=m["longest_sentence_words"], on_target=m["on_target"])
     if event:
         log.info(
             "choice check  %s  choice=%r  plan: setting=%r details=%s action=%s  result=%s",
@@ -543,14 +555,31 @@ async def _definer() -> None:
                     define_queue.append((story_id, index))  # one more try, after the others
 
 
+def _story_names(story: dict) -> set[str]:
+    """The hero's name and the story's other names, never given a definition."""
+    outline = story.get("outline") or {}
+    text = " ".join([story.get("hero_name") or "", story.get("hero_who") or "", outline.get("hero_name") or ""]
+                    + [f.get("name") or "" for f in outline.get("friends") or [] if isinstance(f, dict)])
+    return {w.lower().strip(".,!?'\"") for w in text.split() if w.strip(".,!?'\"")}
+
+
 async def _define_page(story: dict, seg: dict) -> str:
-    """Ask Qwen for this page's tricky words. Returns 'done', 'failed' or 'cancelled'."""
+    """The page's hardest words for its reading level (chosen in Python), defined by Qwen.
+    Returns 'done', 'failed' or 'cancelled'."""
     level = llm.reading_level(story)
     where = f"story={story['id']} page={seg['index'] + 1}"
+    chosen = reading.pick_words(seg["text"], level.key, _story_names(story))
+    if not chosen:
+        seg["words"] = []
+        log.info("definitions ready  %s  level=%s  no word qualifies", where, level.key)
+        store.save(story)
+        return "done"
     started = time.monotonic()
+    names = [w["word"] for w in chosen]
     async with llm_lock:
         stream = llm.LLMStream(
-            messages=llm.build_definition_messages(seg["text"], level), schema=llm.definition_schema(),
+            messages=llm.build_definition_messages(seg["text"], names, level),
+            schema=llm.definition_schema(names, level),
             temperature=0.3, max_tokens=llm.DEFINE_MAX_TOKENS, schema_name="word_definitions",
         )
         define_state["stream"] = stream
@@ -566,10 +595,8 @@ async def _define_page(story: dict, seg: dict) -> str:
             return "failed"
         finally:
             define_state["stream"] = None
-    names = frozenset(w.lower().strip(".,!?'\"") for w in
-                      f"{story.get('hero_name') or ''} {story.get('hero_who') or ''}".split())
     try:
-        words = llm.parse_definitions(raw, seg["text"], names)
+        words = llm.parse_definitions(raw, chosen, level)
     except llm.WriterFailed as exc:
         seg["words_attempts"] = seg.get("words_attempts", 0) + 1
         log.warning("definitions failed  %s  attempt=%d  (%s)  reply began: %r", where,
@@ -577,8 +604,10 @@ async def _define_page(story: dict, seg: dict) -> str:
         store.save(story)
         return "failed"
     seg["words"] = words
-    log.info("definitions ready  %s  level=%s  %.1fs  words=%s", where, level.key,
-             time.monotonic() - started, [w["word"] for w in words])
+    kept = {w["word"] for w in words}
+    log.info("definitions ready  %s  level=%s  %.1fs  chosen=%s  defined=%s%s", where, level.key,
+             time.monotonic() - started, [(w["word"], w["zipf"]) for w in chosen], sorted(kept),
+             f"  skipped={[w['word'] for w in chosen if w['word'] not in kept]}" if len(kept) < len(chosen) else "")
     store.save(story)
     return "done"
 
@@ -897,7 +926,24 @@ async def get_word_audio(story_id: str, index: int, number: int):
     words = seg.get("words") or []
     if not 0 <= number < len(words):
         raise HTTPException(404, "That word has no definition.")
-    path = await narrator.get_word(words[number]["word"], words[number]["definition"], _voice_speed(story))
+    entry = words[number]
+    spoken = entry["definition"] + (f" For example: {entry['example']}" if entry.get("example") else "")
+    path = await narrator.get_word(entry["word"], spoken, _voice_speed(story))
+    if path is None:
+        raise HTTPException(404, "This word cannot be read aloud from the server.")
+    return FileResponse(path, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/stories/{story_id}/say/{word}")
+async def say_word(story_id: str, word: str):
+    """Pre-readers can tap any word on a page to hear it. Only words that are on one of this
+    story's pages are ever voiced; each is made once and shared by every story."""
+    story = _story_or_404(story_id)
+    word = word.strip().lower()
+    on_pages = {w.lower() for seg in story["segments"] for w in re.findall(r"[A-Za-z]+(?:['’][A-Za-z]+)?", seg.get("text") or "")}
+    if not word or len(word) > 30 or word not in on_pages:
+        raise HTTPException(404, "That word is not in this story.")
+    path = await narrator.get_word(word, "", _voice_speed(story))
     if path is None:
         raise HTTPException(404, "This word cannot be read aloud from the server.")
     return FileResponse(path, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=86400"})

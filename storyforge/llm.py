@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from urllib.parse import urlparse
 
+from . import reading
 from .config import settings
 
 
@@ -35,7 +36,7 @@ SYSTEM_PROMPT = (
     "together with a reader. {reader} Write warmly, never frightening or violent. "
     "Keep it gentle: nobody is hurt, attacked or fought. "
     "Each page has at least {min_words} and at most {max_words} words, in one or two short "
-    "paragraphs, told in the past tense. Keep names, looks and places consistent with what came before. "
+    "paragraphs, told in the past tense. {limits} Keep names, looks and places consistent with what came before. "
     "Never wrap up the whole story unless you are told it is the last page. "
     "Reply with one JSON object only, no other text."
 )
@@ -49,6 +50,19 @@ class ReadingLevel:
     style: str  # how the pages are written (in the system prompt)
     reader: str  # who the word definitions are for
     extra_tokens: int = 0  # longer pages need a little more room
+    choices: int = 3  # how many choices each page offers
+    choice_style: str = "one short, exciting sentence of at most 10 words that starts with a verb"
+
+    @property
+    def target(self) -> reading.LevelTarget:
+        return reading.TARGETS[self.key]
+
+    @property
+    def limits(self) -> str:
+        """The measurable limits, said plainly in the page prompt (checked with textstat afterwards)."""
+        t = self.target
+        return (f"Every sentence has at most {t.sentence_words} words. The page reads at a "
+                f"Flesch-Kincaid grade level of {t.grade}.")
 
 
 READING_LEVELS = {
@@ -56,7 +70,8 @@ READING_LEVELS = {
         "pre", "Pre-reader", 30, 45,
         "The reader is a pre-reader (ages 3 to 5) who listens along: use very short, simple sentences "
         "of about 4 to 8 words, everyday words a small child knows, and a little repetition.",
-        "a pre-reader aged 3 to 5"),
+        "a pre-reader aged 3 to 5", choices=2,
+        choice_style="at most 5 very simple words that start with a verb"),
     "early": ReadingLevel(
         "early", "Early reader", 45, 60,
         "The reader is an early reader (kindergarten to grade 2, ages 5 to 8): use short, simple "
@@ -66,7 +81,9 @@ READING_LEVELS = {
         "confident", "Confident reader", 60, 80,
         "The reader is a confident reader (grades 3 to 5, ages 8 to 11): use varied sentences and "
         "rich, vivid, descriptive words.",
-        "a confident reader aged 8 to 11", extra_tokens=60),
+        "a confident reader aged 8 to 11", extra_tokens=60,
+        choice_style=("one vivid sentence of 8 to 14 words that starts with a verb and uses a rich, "
+                      "descriptive word")),
 }
 DEFAULT_LEVEL = "early"
 
@@ -100,10 +117,10 @@ _COMMON_KEYS = (
     "like, never its name), doing ONE thing, in ONE place. Simple and concrete, no feelings.\n"
 )
 _CHOICES_KEY = (
-    '"choices": a list of 2 or 3 choices for what the hero does next. Each is a real fork in the '
+    '"choices": a list of exactly {count} choices for what the hero does next. Each is a real fork in the '
     "quest: a different place to go, or a different decision about how to reach the goal, so each "
     "leads to a different next page. Never a small action like looking, waiting or listening. Each "
-    "is one short, exciting sentence of at most 10 words that starts with a verb.\n"
+    "is {style}.\n"
 )
 _SUMMARY_KEY = (
     '"continuity_summary": at most 60 words holding everything worth remembering so far: '
@@ -300,12 +317,15 @@ def soften(text: str) -> str:
     return _WEAPON.sub(swap, _ROUGH.sub(swap, text))
 
 
-def tidy_page(text: str, max_words: int, floor: int = 0) -> tuple[str, dict]:
+def tidy_page(text: str, max_words: int, floor: int = 0, split_over: int = 0) -> tuple[str, dict]:
     """After the repeat filter, the last checks on a page's text, in this order:
     1. gentle: sentences with a rough word are dropped while at least `floor` words remain; any
        still left get their rough words softened.
-    2. length: whole sentences are kept up to `max_words` (the first sentence always stays).
+    2. short sentences (pre-readers, `split_over`): longer ones are split at "and", "but" or a comma.
+    3. length: whole sentences are kept up to `max_words` (the first sentence always stays).
     Paragraphs are kept. Returns (text, {"gentle": sentences changed, "trimmed_from": words or 0})."""
+    if split_over:
+        text = reading.split_long_sentences(text, split_over)
     blocks = [_SENTENCE_END.split(p.strip()) for p in text.split("\n\n") if p.strip()]
     rough = sum(1 for b in blocks for x in b if not_gentle(x))
     total = word_count(text)
@@ -665,8 +685,8 @@ def drop_hero_looks(text: str, hero: frozenset[str], features: frozenset[str], f
     return result, dropped
 
 
-def _choices_key(next_beat: str) -> str:
-    return _CHOICES_KEY + f"  The next page will be about this, so each choice is a different way toward it: {next_beat}\n"
+def _choices_key(next_beat: str, level: ReadingLevel) -> str:
+    return _CHOICES_KEY.format(count=level.choices, style=level.choice_style) + f"  The next page will be about this, so each choice is a different way toward it: {next_beat}\n"
 
 
 def must_show(story: dict, event: str | None, final: bool) -> str:
@@ -681,7 +701,8 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
     """Build the chat messages for the next page. Sends a compact summary plus only the
     most recent page, never the whole history, so the 2048-token context is not exceeded."""
     level = reading_level(story)
-    system = SYSTEM_PROMPT.format(reader=level.style, min_words=level.min_words, max_words=level.max_words)
+    system = SYSTEM_PROMPT.format(reader=level.style, min_words=level.min_words, max_words=level.max_words,
+                                  limits=level.limits)
     ready = [s for s in story["segments"] if s["status"] == "ready"]
     page_number = len(ready) + 1
     pages = planned_pages(story)
@@ -723,11 +744,12 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             + _PLAN_KEYS
             + ('"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n' if hero else "") +
             '"segment": the text of page 1, written from the plan above: '
-            f'{level.min_words} to {level.max_words} words in one or two short paragraphs.\n'
+            f'{level.min_words} to {level.max_words} words in one or two short paragraphs. '
+            f'Every sentence at most {level.target.sentence_words} words.\n'
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
             '"world": the setting in at most 20 words.\n'
-            + _COMMON_KEYS + _choices_key(next_beat) + _SUMMARY_KEY
+            + _COMMON_KEYS + _choices_key(next_beat, level) + _SUMMARY_KEY
         )
     else:
         # Only a short summary: the previous page's text would drown out the reader's choice (which a
@@ -752,7 +774,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
                 "the reader decides what happens next. Do not end the story."
                 + (" The story ends on the next page, so lead toward the happy ending." if near_end else "")
             )
-            choices_key = _choices_key(page_beat(story, page_number + 1, final=page_number + 1 >= pages))
+            choices_key = _choices_key(page_beat(story, page_number + 1, final=page_number + 1 >= pages), level)
         decision = action or "Continue the adventure in the most natural way."
         user = (
             # Only the hero's name and kind after page 1, never its looks, which the model retold: no
@@ -784,7 +806,8 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             + '"beat": (already filled in: this page\'s beat. The page shows it happening.)\n'
             + _PLAN_KEYS +
             f'"segment": the text of page {page_number}, written from the plan above: '
-            f'{level.min_words} to {level.max_words} words in one or two short paragraphs.\n'
+            f'{level.min_words} to {level.max_words} words in one or two short paragraphs. '
+            f'Every sentence at most {level.target.sentence_words} words.\n'
             + _COMMON_KEYS + choices_key + _SUMMARY_KEY
             # Last, because a small model follows the last instruction best. On the last page the
             # quest's goal is reached there too ("the lost puppy is found and named").
@@ -794,7 +817,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
 
 
 def response_schema(first: bool, final: bool, drawn_hero: bool = False, event: str | None = None,
-                    beat: str | None = None) -> dict:
+                    beat: str | None = None, choices: int = 3) -> dict:
     """JSON schema handed to llama-server so its grammar forces well-formed output.
     `event` (the reader's choice) and `beat` (this page's step in the quest) are constant first
     properties: the grammar writes them into the plan before the model plans the setting and action,
@@ -818,7 +841,7 @@ def response_schema(first: bool, final: bool, drawn_hero: bool = False, event: s
         props["world"] = {"type": "string"}
     props["visual_prompt"] = {"type": "string"}
     props["choices"] = {"type": "array", "items": {"type": "string"},
-                        "minItems": 0 if final else 2, "maxItems": 0 if final else 3}
+                        "minItems": 0 if final else choices, "maxItems": 0 if final else choices}
     props["continuity_summary"] = {"type": "string"}
     return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
 
@@ -1288,7 +1311,8 @@ class Page:
     repeats_dropped: int = 0  # sentences left out because an earlier page already had them
 
 
-def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | None = None) -> Page:
+def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | None = None,
+               max_choices: int = 3) -> Page:
     """Validate the model's reply. Raises WriterFailed when no usable page text exists.
     Sentences repeated from `earlier_pages` are dropped before the length is checked."""
     data = _loads_lenient(raw)
@@ -1343,10 +1367,10 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
     forks = [c for c in choices if c.split()[0].lower() not in SMALL_ACTIONS]
     if len(forks) >= 2:
         choices = forks
-    choices = choices[:3]
+    choices = choices[:max_choices]
     if not final and len(choices) < 2:
         used_fallback = True
-        choices = (choices + [c for c in FALLBACK_CHOICES if c.lower() not in {x.lower() for x in choices}])[:3]
+        choices = (choices + [c for c in FALLBACK_CHOICES if c.lower() not in {x.lower() for x in choices}])[:max_choices]
 
     def line(key: str, limit: int) -> str:
         value = data.get(key)
@@ -1380,80 +1404,97 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
 # --------------------------------------------------------------------------
 # Tap-a-word definitions
 # --------------------------------------------------------------------------
-# Once a page is finished (and llama-server is idle), Qwen picks the 3-4 hardest words on it and
-# defines each in one sentence for the story's reading level. Only words that really are on the
-# page are kept; the browser underlines them.
+# Once a page is finished (and llama-server is idle), the words are chosen in Python by how rare
+# they are (storyforge/reading.py, the same every time) and Qwen only defines them for the story's
+# reading level: pre-readers a very short definition and one emoji, early readers one simple
+# sentence, confident readers one sentence and a tiny example. A word whose definition fails the
+# checks is left out.
 
 DEFINE_SYSTEM = "You help children learn new words. Reply with one JSON object only, no other text."
-DEFINE_MAX_TOKENS = 260
+DEFINE_MAX_TOKENS = 320
+
+_DEFINE_HOW = {
+    "pre": ('a very short definition of at most 8 easy words, for a child aged 3 to 5, and one emoji '
+            'that shows it. Keys: "definition" and "emoji".'),
+    "early": ('a definition in one simple sentence of at most 15 words, for a child aged 5 to 8. '
+              'Key: "definition".'),
+    "confident": ('a definition in one sentence of at most 20 words, for a reader aged 8 to 11, and a '
+                  'tiny example: a new short sentence of at most 12 words that uses the word. Keys: '
+                  '"definition" and "example".'),
+}
+_DEFINE_LIMITS = {"pre": 10, "early": 18, "confident": 24}  # most words a definition may have
+_EXAMPLE_LIMIT = 16
 
 
-def build_definition_messages(text: str, level: ReadingLevel) -> list[dict]:
+def build_definition_messages(text: str, words: list[str], level: ReadingLevel) -> list[dict]:
     # No example words or definitions: a small model copies examples.
+    listed = ", ".join(f'"{w}"' for w in words)
     user = (
         f'Here is a page from a story for children:\n"""\n{text}\n"""\n\n'
-        f"The reader is {level.reader}. Pick the 3 or 4 words on this page that this reader is "
-        "least likely to know. Copy each word exactly as it is written on the page. Never pick a "
-        "name or a very easy word.\n"
-        f"For each word write a definition: one short sentence that {level.reader} understands, "
-        "saying what the word means here.\n"
-        'Use the JSON key "words": a list of objects with the keys "word" and "definition".'
+        f"Define these words from the page: {listed}. Say what each word means here, in words "
+        f"{level.reader} knows, without using the word itself in its definition.\n"
+        f"For each word write {_DEFINE_HOW[level.key]}\n"
+        'Use the JSON key "words": an object with one entry per word, keyed by the word exactly as given.'
     )
     return [{"role": "system", "content": DEFINE_SYSTEM}, {"role": "user", "content": user}]
 
 
-def definition_schema() -> dict:
-    item = {
-        "type": "object",
-        "properties": {"word": {"type": "string"}, "definition": {"type": "string"}},
-        "required": ["word", "definition"],
-        "additionalProperties": False,
-    }
-    return {
-        "type": "object",
-        "properties": {"words": {"type": "array", "items": item, "minItems": 3, "maxItems": 4}},
-        "required": ["words"],
-        "additionalProperties": False,
-    }
+def definition_schema(words: list[str], level: ReadingLevel) -> dict:
+    """Exactly the chosen words, each with the fields its reading level asks for."""
+    fields: dict = {"definition": {"type": "string", "maxLength": 160}}
+    if level.key == "pre":
+        fields["emoji"] = {"type": "string", "maxLength": 8}
+    if level.key == "confident":
+        fields["example"] = {"type": "string", "maxLength": 120}
+    item = {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
+    entries = {"type": "object", "properties": {w: item for w in words}, "required": list(words),
+               "additionalProperties": False}
+    return {"type": "object", "properties": {"words": entries}, "required": ["words"], "additionalProperties": False}
 
 
-def _word_pattern(word: str) -> re.Pattern:
-    return re.compile(r"(?<![\w'’-])" + re.escape(word) + r"(?![\w'’-])", re.I)
+_EMOJI = re.compile(r"[\u2190-\u2bff\u2600-\u27bf\U0001F000-\U0001FAFF][\ufe0f\u200d\U0001F000-\U0001FAFF\u2600-\u27bf]*")
 
 
-def _starts_sentence(text: str, at: int) -> bool:
-    before = text[:at].rstrip(" \t\"'“‘(")
-    return not before or before[-1] in ".!?\n…"
+def _one_sentence(text: str) -> str:
+    first = re.match(r"(.+?[.!?])(\s|$)", text)
+    text = first.group(1) if first else text.rstrip(",;: ") + "."
+    return text[:1].upper() + text[1:]
 
 
-def parse_definitions(raw: str, text: str, names: frozenset[str] = frozenset()) -> list[dict]:
-    """The model's words that are really on the page, each as the page writes it, with a one-sentence
-    definition. Names (capitalised everywhere on the page, or one of `names`) and small words are
-    left out. Raises WriterFailed when the reply is not usable at all."""
+def parse_definitions(raw: str, chosen: list[dict], level: ReadingLevel) -> list[dict]:
+    """Qwen's definitions for the chosen words (reading.pick_words), checked: one sentence, short
+    enough for the level, not just the word again; pre-readers need an emoji, confident readers an
+    example that uses the word. A word that fails is skipped. Raises WriterFailed when the reply is
+    not usable at all."""
     data = _loads_lenient(raw)
-    items = data.get("words") if isinstance(data, dict) else None
-    if not isinstance(items, list):
+    entries = data.get("words") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
         raise WriterFailed("no word list in the reply")
+    lowered = {str(k).strip().lower(): v for k, v in entries.items()}
     found: list[dict] = []
-    seen: set[str] = set()
-    for item in items:
-        if not isinstance(item, dict):
+    for pick in chosen:
+        word = pick["word"]
+        entry = lowered.get(word.lower())
+        if not isinstance(entry, dict):
             continue
-        word = clean_line(str(item.get("word") or ""), 40).strip(" .,!?;:\"'“”‘’()")
-        definition = clean_line(str(item.get("definition") or ""), 240)
-        if not word or not definition or len(word.split()) > 3 or len(word) < 3 or not re.search(r"[A-Za-z]", word):
+        definition = clean_line(str(entry.get("definition") or ""), 240)
+        emoji = _EMOJI.search(str(entry.get("emoji") or "")) or _EMOJI.search(definition)
+        definition = " ".join(_EMOJI.sub("", definition).split())  # an emoji is shown, never read aloud
+        if not definition or not re.search(r"[A-Za-z]", definition):
             continue
-        key = word.lower()
-        if key in seen or key in _SMALL_WORDS or key in names or definition.lower().strip(" .") == key:
+        definition = _one_sentence(definition.rstrip(" ."))
+        if definition.lower().strip(" .!") == word.lower() or word_count(definition) > _DEFINE_LIMITS[level.key]:
             continue
-        matches = list(_word_pattern(word).finditer(text))
-        if not matches:
-            continue  # not on the page (or a different form of the word)
-        if all(m.group(0)[0].isupper() for m in matches) and (
-                word[0].isupper() or any(not _starts_sentence(text, m.start()) for m in matches)):
-            continue  # a name: capitalised everywhere on the page
-        first = re.match(r"(.+?[.!?])(\s|$)", definition)
-        definition = first.group(1) if first else definition.rstrip(",;:") + "."
-        seen.add(key)
-        found.append({"word": matches[0].group(0), "definition": definition[0].upper() + definition[1:]})
-    return found[:4]
+        item = {"word": word, "definition": definition, "zipf": pick["zipf"], "syllables": pick["syllables"]}
+        if level.key == "pre":
+            if not emoji:
+                continue
+            item["emoji"] = emoji.group(0)
+        if level.key == "confident":
+            example = clean_line(str(entry.get("example") or ""), 160)
+            stem = reading.lemma(word)[:max(3, min(len(word), 5) - 1)]
+            if not example or word_count(example) > _EXAMPLE_LIMIT or stem not in example.lower():
+                continue
+            item["example"] = _one_sentence(example)
+        found.append(item)
+    return found

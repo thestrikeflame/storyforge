@@ -447,9 +447,10 @@
     words.hidden = false;
     problem.hidden = true;
     words.classList.toggle("opening", page.index === 0);
+    words.classList.toggle("level-pre", state.story.readingLevel === "pre"); // bigger text, every word can be tapped
     words.classList.toggle("writing", page.status === "writing" && !page.text_complete && Boolean(page.text));
     const defined = page.status === "ready" ? page.words || [] : [];
-    const key = `${state.story.id}:${page.index}:${page.text}:${defined.map((w) => w.word).join("|")}`;
+    const key = `${state.story.id}:${page.index}:${page.status}:${page.text}:${defined.map((w) => w.word).join("|")}`;
     if (key === shownText) return;
     shownText = key;
     wordTip.close();
@@ -467,6 +468,31 @@
     });
     existing.slice(paragraphs.length).forEach((el) => el.remove());
     if (defined.length) underlineWords([...words.querySelectorAll("p")], defined);
+    if (state.story.readingLevel === "pre" && page.status === "ready" && page.text_complete) {
+      words.querySelectorAll("p").forEach(tappableWords);
+    }
+  }
+
+  /* Pre-readers: every other word on a finished page can be tapped to hear it read aloud. */
+  function tappableWords(p) {
+    [...p.childNodes].forEach((node) => {
+      if (node.nodeType !== Node.TEXT_NODE) return; // the underlined words keep their bubble
+      const parts = [];
+      let at = 0;
+      const text = node.textContent;
+      for (const found of text.matchAll(/[A-Za-z]+(?:['’][A-Za-z]+)?/g)) {
+        if (found.index > at) parts.push(document.createTextNode(text.slice(at, found.index)));
+        const word = document.createElement("span");
+        word.className = "say";
+        word.textContent = found[0];
+        word.setAttribute("role", "button");
+        word.setAttribute("aria-label", `Hear "${found[0]}"`);
+        parts.push(word);
+        at = found.index + found[0].length;
+      }
+      if (at < text.length) parts.push(document.createTextNode(text.slice(at)));
+      node.replaceWith(...parts);
+    });
   }
 
   /* Tap-a-word: each defined word gets a dotted underline where it first appears on the page.
@@ -523,11 +549,26 @@
       this.el = el;
       el.setAttribute("aria-expanded", "true");
       $("word-bubble-word").textContent = entry.word.charAt(0).toUpperCase() + entry.word.slice(1);
+      $("word-bubble-emoji").textContent = entry.emoji || "";
       $("word-bubble-text").textContent = entry.definition;
+      $("word-bubble-example").textContent = entry.example ? `For example: ${entry.example}` : "";
+      $("word-bubble-example").hidden = !entry.example;
       const bubble = $("word-bubble");
       bubble.hidden = false;
       this.place();
-      this.say(page, Number(el.dataset.n), entry);
+      const spoken = `${entry.word}. ${entry.definition}${entry.example ? ` For example: ${entry.example}` : ""}`;
+      this.say(page, spoken, `/api/stories/${state.story.id}/segments/${page.index}/words/${Number(el.dataset.n)}/audio`);
+    },
+
+    // Pre-readers: any other word is just read aloud, no bubble.
+    sayWord(el) {
+      const page = currentPage();
+      if (!page) return;
+      this.close();
+      el.classList.add("saying");
+      setTimeout(() => el.classList.remove("saying"), 700);
+      const word = el.textContent;
+      this.say(page, word, `/api/stories/${state.story.id}/say/${encodeURIComponent(word.toLowerCase())}`);
     },
 
     place() {
@@ -542,7 +583,7 @@
       bubble.style.top = `${Math.round(top)}px`;
     },
 
-    say(page, n, entry) {
+    say(page, spoken, url) {
       const run = ++this.run;
       if (narrator.playing && narrator.page === page.index) {
         narrator.pause();
@@ -560,7 +601,7 @@
         if (run !== this.run) return;
         if (!("speechSynthesis" in window)) { done(); return; }
         try { speechSynthesis.cancel(); } catch (_) { /* nothing queued */ }
-        const utterance = new SpeechSynthesisUtterance(`${entry.word}. ${entry.definition}`);
+        const utterance = new SpeechSynthesisUtterance(spoken);
         const voice = narrator.canSpeak ? narrator.voice() : null;
         if (voice) { utterance.voice = voice; utterance.lang = voice.lang; } else utterance.lang = "en-US";
         utterance.rate = speechRate();
@@ -574,7 +615,7 @@
       const audio = this.audio;
       audio.onended = done;
       audio.onerror = browserVoice; // no recording for this word: the browser's voice reads it
-      audio.src = `/api/stories/${state.story.id}/segments/${page.index}/words/${n}/audio`;
+      audio.src = url;
       audio.play().catch((error) => { if (error && error.name === "NotAllowedError") browserVoice(); });
     },
 
@@ -1096,6 +1137,8 @@
   $("words").addEventListener("click", (event) => {
     const word = event.target.closest(".word");
     if (word) wordTip.open(word);
+    const say = event.target.closest(".say");
+    if (say) wordTip.sayWord(say);
   });
   $("words").addEventListener("keydown", (event) => {
     const word = event.target.closest(".word");

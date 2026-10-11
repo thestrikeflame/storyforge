@@ -21,6 +21,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+# The fakes are imported by file name: textstat installs a top-level "tests" package of its own.
+sys.path.insert(1, str(ROOT / "tests"))
 APP_PORT, LLM_PORT = 18000, 18080
 CLOUD_PORT, HF_PORT = 18001, 18091  # a second StoryForge in Hugging Face mode, and a fake router
 BASE = f"http://127.0.0.1:{APP_PORT}"
@@ -487,31 +489,107 @@ class Parsing(unittest.TestCase):
         rich = llm.build_messages({"premise": "x", "segments": [], "reading_level": "confident"}, None, False)[0]["content"]
         self.assertIn("rich, vivid", rich)
 
-    def test_definitions_are_checked_against_the_page(self):
+    def test_word_selection_is_measured_not_guessed(self):
+        from storyforge import reading
+        page = ("Pip the dragon felt happy. Pip glided over the shimmering lake, where a gentle breeze "
+                "carried the scent of lavender through the meadow. An enormous lantern glowed. "
+                "The shimmering water was calm, and Pip was happy.")
+        confident = reading.pick_words(page, "confident", {"pip"})
+        words = [w["word"] for w in confident]
+        self.assertEqual(words[0], "shimmering")           # the rarest word first (zipf about 3)
+        self.assertNotIn("happy", words)                   # common (zipf about 5.3)
+        self.assertNotIn("Pip", words)                     # the hero's name
+        self.assertEqual(words.count("shimmering"), 1)     # first occurrence only
+        self.assertTrue(all(w["zipf"] < 3.3 for w in confident))
+        self.assertLess(reading.word_zipf("shimmering"), 3.3)
+        self.assertGreater(reading.word_zipf("happily"), 5)  # scored as its base form, "happy"
+        self.assertEqual(reading.lemma("shimmering"), "shimmer")
+        self.assertEqual(reading.lemma("bunnies"), "bunny")
+        early = reading.pick_words(page, "early", {"pip"})
+        self.assertLessEqual(len(early), 3)
+        self.assertTrue(all(w["zipf"] < 4.0 for w in early))
+        pre = reading.pick_words(page, "pre", {"pip"})
+        self.assertLessEqual(len(pre), 2)
+        self.assertTrue(all(3.5 <= w["zipf"] < 4.5 for w in pre), pre)
+        self.assertNotIn("shimmering", [w["word"] for w in pre])  # too rare for a pre-reader
+        many = " ".join(f"The {w} was there." for w in
+                        ("shimmering", "lavender", "glistening", "drowsy", "meandering", "luminous", "velvety"))
+        self.assertEqual(len(reading.pick_words(many, "confident")), 4)
+        # names written mid-sentence, stop words, short words and made-up words are never chosen
+        names = reading.pick_words("Then Zorblax and Mirabelle sat by the bog with Quillon.", "confident")
+        self.assertEqual(names, [])
+
+    def test_pre_reader_sentences_are_split(self):
+        from storyforge import llm, reading
+        text = ("Mia walked through the green forest and she felt very happy today. "
+                "She wanted to fly, but the wind was far too strong for her wings. "
+                "The kite flew high over the green hills, and it danced in the wind.\n\n"
+                "They found a red hat, a blue kite, and a green ball by the pond. "
+                "In the morning, the sun rose high over all the quiet little hills. Mia smiled.")
+        out = reading.split_long_sentences(text, 10)
+        self.assertIn("Mia walked through the green forest. She felt very happy today.", out)
+        self.assertIn("She wanted to fly. But the wind was far too strong for her wings.", out)
+        self.assertIn("The kite flew high over the green hills. It danced in the wind.", out)
+        self.assertIn("They found a red hat, a blue kite, and a green ball by the pond.", out)  # a list stays whole
+        self.assertIn("In the morning, the sun rose high", out)  # no half-sentence "In the morning."
+        self.assertEqual(out.count("\n\n"), 1)  # paragraphs kept
+        self.assertEqual(reading.split_long_sentences("Mia and Leo ran home.", 3), "Mia and Leo ran home.")
+        # tidy_page splits for pre-readers only
+        self.assertIn("forest. She felt", llm.tidy_page(text, 500, split_over=10)[0])
+        self.assertIn("forest and she felt", llm.tidy_page(text, 500)[0])
+
+    def test_pages_are_measured_against_the_level(self):
+        from storyforge import reading
+        easy = reading.measure("The cat sat. The dog ran. They had fun in the sun.", "pre")
+        self.assertLess(easy["grade"], 2)
+        self.assertEqual((easy["longest_sentence_words"], easy["sentence_limit"]), (6, 8))
+        self.assertTrue(easy["on_target"])
+        hard = reading.measure("The magnificent, iridescent dragonfly hovered contemplatively above the "
+                               "extraordinarily luminous, meandering river at twilight.", "pre")
+        self.assertFalse(hard["on_target"])
+
+    def test_definitions_follow_the_level(self):
         from storyforge import llm
-        page = ("Mira crept closer. The tenth mushroom glowed, and Pip felt curious.\n\n"
-                "Glowing moss covered a shimmering door. Pip peeked.")
-        raw = json.dumps({"words": [
-            {"word": "glowed", "definition": "gave off a soft light. Like a lamp does."},
-            {"word": "Mira", "definition": "the dragon"},                # a name (capitalised mid-sentence too)
-            {"word": "pip", "definition": "a friend"},                   # one of the hero's names
-            {"word": "zeppelin", "definition": "a big airship"},         # not on the page
-            {"word": "flicker", "definition": "to shine on and off"},    # not this form of the word
-            {"word": "Shimmering", "definition": "shining with a wavy light"},  # a different case is fine
-            {"word": "the", "definition": "a little word"},              # too easy
-            {"word": "GLOWED", "definition": "again"},                   # already there
-        ]})
-        found = llm.parse_definitions(raw, page, frozenset({"pip"}))
-        self.assertEqual(found, [
-            {"word": "glowed", "definition": "Gave off a soft light."},
-            {"word": "shimmering", "definition": "Shining with a wavy light."},
-        ])
+        chosen = [{"word": "shimmering", "zipf": 2.98, "syllables": 3}, {"word": "glided", "zipf": 3.33, "syllables": 2},
+                  {"word": "lavender", "zipf": 3.44, "syllables": 3}, {"word": "meadow", "zipf": 3.6, "syllables": 2}]
+        raw = json.dumps({"words": {
+            "shimmering": {"definition": "shining with a soft, wavy light. Like water.",
+                           "example": "The lake was shimmering in the sun."},
+            "glided": {"definition": "moved smoothly", "example": "The bird flew away."},  # example misses the word
+            "lavender": {"definition": "lavender", "example": "Lavender smells nice."},       # just the word again
+            "zeppelin": {"definition": "a big airship", "example": "A zeppelin flew."},       # not chosen
+        }})
+        found = llm.parse_definitions(raw, chosen, llm.READING_LEVELS["confident"])
+        self.assertEqual(found, [{"word": "shimmering", "definition": "Shining with a soft, wavy light.",
+                                  "zipf": 2.98, "syllables": 3, "example": "The lake was shimmering in the sun."}])
+        pre = llm.parse_definitions(json.dumps({"words": {
+            "meadow": {"definition": "a big field of grass 🌾", "emoji": "🌾"},
+            "glided": {"definition": "moved very smoothly", "emoji": "none"},  # no emoji: skipped
+            "lavender": {"definition": "a purple flower that smells sweet and is often found in big gardens", "emoji": "💜"},
+        }}), chosen, llm.READING_LEVELS["pre"])
+        self.assertEqual(pre, [{"word": "meadow", "definition": "A big field of grass.", "zipf": 3.6, "syllables": 2,
+                                "emoji": "🌾"}])  # lavender's definition is too long for a pre-reader
         with self.assertRaises(llm.WriterFailed):
-            llm.parse_definitions("no json here", page)
-        prompt = llm.build_definition_messages(page, llm.READING_LEVELS["pre"])[1]["content"]
-        self.assertIn(page, prompt)
-        self.assertIn("a pre-reader aged 3 to 5", prompt)
-        self.assertEqual(llm.definition_schema()["properties"]["words"]["maxItems"], 4)
+            llm.parse_definitions("no json here", chosen, llm.READING_LEVELS["early"])
+        prompt = llm.build_definition_messages("A page.", ["meadow"], llm.READING_LEVELS["pre"])[1]["content"]
+        self.assertIn('"meadow"', prompt)
+        self.assertIn("one emoji", prompt)
+        schema = llm.definition_schema(["meadow", "glided"], llm.READING_LEVELS["confident"])["properties"]["words"]
+        self.assertEqual(schema["required"], ["meadow", "glided"])
+        self.assertEqual(set(schema["properties"]["meadow"]["properties"]), {"definition", "example"})
+
+    def test_choices_and_limits_by_level(self):
+        from storyforge import llm
+        for key, count, limit in (("pre", 2, 8), ("early", 3, 12), ("confident", 3, 18)):
+            story = {"premise": "a dragon", "segments": [], "reading_level": key}
+            system, user = (m["content"] for m in llm.build_messages(story, None, False))
+            self.assertIn(f"Every sentence has at most {limit} words.", system)
+            self.assertIn("Flesch-Kincaid grade level of", system)
+            self.assertIn(f"exactly {count} choices", user)
+            schema = llm.response_schema(True, False, choices=count)["properties"]["choices"]
+            self.assertEqual((schema["minItems"], schema["maxItems"]), (count, count))
+        raw = json.dumps({"segment": " ".join(["word"] * 40), "choices": ["Go up", "Go down", "Go home"]})
+        self.assertEqual(len(llm.parse_page(raw, first=False, final=False, max_choices=2).choices), 2)
 
     def test_outline_beats_and_the_hero_line(self):
         from storyforge import llm
@@ -556,7 +634,7 @@ class Parsing(unittest.TestCase):
 
     def test_a_painted_hero_is_cut_out_of_its_white_paper(self):
         from storyforge.images import cut_out_hero, hero_prompt
-        from tests.fake_hf import drawing_png, tiny_png
+        from fake_hf import drawing_png, tiny_png
         from PIL import Image
         import io
         hero = Image.open(io.BytesIO(cut_out_hero(drawing_png(96))))
@@ -663,7 +741,7 @@ class Parsing(unittest.TestCase):
         later = llm.build_messages(story, "Go", False)[1]["content"]
         self.assertIn("so each choice is a different way toward it: Crabby and a friend discover a clue", later)
         schema = llm.response_schema(False, False)["properties"]["choices"]
-        self.assertEqual((schema["minItems"], schema["maxItems"]), (2, 3))
+        self.assertEqual((schema["minItems"], schema["maxItems"]), (3, 3))
 
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
@@ -672,8 +750,9 @@ class Parsing(unittest.TestCase):
                  "segments": [{"status": "ready", "text": long_page} for _ in range(30)]}
         text = build_messages(story, "Open the door", False)[1]["content"]
         # Only the latest page (trimmed) is sent, not all thirty. With the page-plan instructions a
-        # realistic worst case measured 176 + 717 prompt tokens + 480 reply = ~1400 of llama-server's 2048.
-        self.assertLess(len(text), 2800)
+        # realistic worst case measured 176 + 717 prompt tokens + 480 reply = ~1400 of llama-server's 2048
+        # (the reading level's sentence limit added about 10 tokens).
+        self.assertLess(len(text), 2850)
         self.assertIn("Write page 31 only", text)
         self.assertIn("Open the door", text)
 
@@ -1248,7 +1327,7 @@ class ElevenLabsNarration(unittest.TestCase):
 
 def drawing_payload(idea: str = "") -> dict:
     import base64
-    from tests.fake_hf import tiny_png
+    from fake_hf import tiny_png
     hero = tiny_png(64)
     jpeg = b"\xff\xd8\xff\xe0" + os.urandom(600)  # only the start of a JPEG is checked
     return {
@@ -1496,15 +1575,20 @@ class ReadingLevelsAndWords(unittest.TestCase):
         page = wait_for(lambda: (s := segment(story_id, 0)) and not s["words_pending"] and s, timeout=60)
         rows = (TMP / "logs" / "storyforge.log").read_text()
         self.assertEqual(rows.count(f"definitions ready  story={story_id} page=1 "), 1)
+        from storyforge import reading
         words = [w["word"] for w in page["words"]]
-        self.assertEqual(len(words), 3, page["words"])
-        self.assertNotIn("zeppelin", words)  # not on the page
+        chosen = reading.pick_words(page["text"], "early", {"mira"})
+        self.assertEqual(words, [w["word"] for w in chosen])  # chosen in Python, not by the model
+        self.assertTrue(1 <= len(words) <= 3, page["words"])  # Early: at most 3
+        self.assertNotIn("zeppelin", words)  # not asked for
         self.assertNotIn("Mira", words)      # a name
         for entry in page["words"]:
             self.assertIn(entry["word"], page["text"])
             self.assertTrue(entry["definition"].endswith("."))
             self.assertNotIn("More words", entry["definition"])  # one sentence only
+            self.assertLess(entry["zipf"], 4.0)
         self.assertIn("an early reader aged 5 to 8", llm_state()["last_define_user"])
+        self.assertRegex(rows, rf"page reading level  story={story_id} page=1  level=early  grade=")
         saved = json.loads((TMP / "data" / "sessions" / f"{story_id}.json").read_text())
         self.assertEqual(saved["segments"][0]["words"], page["words"])
         # without ElevenLabs the word endpoint says no, and the browser's voice reads it
