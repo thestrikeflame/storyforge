@@ -199,12 +199,19 @@ async def write_segment(story: dict, seg: dict) -> None:
         async with llm_lock:
             if story.get("abandoned"):
                 return
+            if first and not story.get("outline"):
+                await _plan_story(story)
+                if story.get("abandoned"):
+                    return
+            # This page's step in the quest (the happy ending on the last page).
+            seg["beat"] = llm.page_beat(story, seg["index"] + 1, final)
             # A second try only when the reply has no usable page at all (broken, or under 15 words).
             for attempt in (1, 2):
                 check = {"event": event, "known": known, "hero": story.get("hero_name"), "earlier": earlier}
                 stream = llm.LLMStream(
                     messages=llm.build_messages(story, seg["action"], final, event=event),
-                    schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description")), event=event),
+                    schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description")), event=event,
+                                               beat=seg["beat"]),
                     temperature=settings.llm_temperature if attempt == 1 else 0.5,
                     max_tokens=settings.llm_max_tokens + level.extra_tokens,
                 )
@@ -309,6 +316,8 @@ async def write_segment(story: dict, seg: dict) -> None:
         if page.hero_name and story.get("hero_description"):
             story["hero_name"] = page.hero_name
         story["world"] = page.world
+    if seg.get("beat"):
+        log.info("page beat  %s  beat=%r%s", where, seg["beat"], "  (last page)" if final else "")
     if page.summary:
         story["summary"] = page.summary
     else:  # the model forgot the summary: extend the old one with this page's first sentence
@@ -363,6 +372,30 @@ async def write_segment(story: dict, seg: dict) -> None:
     worker.enqueue(story, seg)
     store.save(story)
     _want_definitions(story)
+
+
+async def _plan_story(story: dict) -> None:
+    """One Qwen call before page 1: the story's quest (goal, problem, friends, happy ending), saved
+    with the story. Every page's beat comes from it. A plain quest stands in if the call fails."""
+    started = time.monotonic()
+    stream = llm.LLMStream(
+        messages=llm.build_outline_messages(story), schema=llm.outline_schema(),
+        temperature=0.7, max_tokens=llm.OUTLINE_MAX_TOKENS, schema_name="story_outline",
+    )
+    active_streams[story["id"]] = stream
+    try:
+        story["outline"] = llm.parse_outline(await asyncio.to_thread(stream.run), story)
+    except (llm.WriterFailed, llm.WriterOffline) as exc:
+        story["outline"] = llm.fallback_outline(story)
+        log.warning("outline failed  story=%s  (%s); using a plain quest", story["id"], exc)
+    outline = story["outline"]
+    if outline.get("hero_name") and not story.get("hero_name"):
+        story["hero_name"] = outline["hero_name"]
+    log.info("outline ready  story=%s  %.1fs  pages=%d  hero=%r (%s)  goal=%r  obstacle=%r  friends=%s  ending=%r",
+             story["id"], time.monotonic() - started, outline["pages"], outline.get("hero_name"),
+             outline.get("hero_kind"), outline["goal"], outline["obstacle"],
+             [f"{f['name']} ({f['kind']})" for f in outline["friends"]], outline["ending"])
+    store.save(story)
 
 
 def _voice_speed(story: dict) -> float:
@@ -675,6 +708,10 @@ async def continue_story(story_id: str, body: NextPage):
         kind = "finish"  # the book is full: the next page is the ending
 
     seg = new_segment(last["index"] + 1, action, kind)
+    # The story's planned length is reached: this page wraps up the quest (the reader's choice
+    # still happens on it).
+    if seg["index"] + 1 >= llm.planned_pages(story):
+        seg["final"] = True
     story["segments"].append(seg)
     store.save(story)
     _start_writing(story, seg)
