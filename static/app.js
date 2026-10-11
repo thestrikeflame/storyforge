@@ -16,7 +16,7 @@
   const STORAGE_LEVEL = "storyforge.level"; // the reading level, shared with /draw
 
   const state = {
-    config: { tts: "browser", listen: true, images: true, https_port: null, max_premise_chars: 600, max_action_chars: 300 },
+    config: { tts: "browser", server_stt: false, images: true, https_port: null, max_premise_chars: 600, max_action_chars: 300 },
     story: null,          // { id, title, ended, pages: [...] }
     view: 0,              // index of the page being shown
     busy: false,          // a request that changes the story is in flight
@@ -112,14 +112,20 @@
   }
 
   /* ───────── microphone ─────────
-   * Tap to talk (static/listen.js): the browser records, the Jetson writes down what was said
-   * (whisper.cpp, or Hugging Face's Whisper), and the words land in the text box to check before
-   * sending. Recording needs a secure page (https or localhost); that is a browser rule. */
+   * Two ways to turn speech into text:
+   *   "browser"  the browser's own speech recognition (Chrome, Edge, Safari)
+   *   "server"   record here, let whisper.cpp on the Jetson transcribe (works offline)
+   * Both need a secure page (https or localhost); that is a browser rule. */
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let micBrowserBroken = false; // set when the browser's recognition reports it cannot work
 
   function micMode() {
     if (!window.isSecureContext) return "insecure";
-    if (!window.StoryListen || !window.StoryListen.supported() || state.config.listen === false) return "unsupported";
-    return "ok";
+    if (SpeechRecognition && !micBrowserBroken) return "browser";
+    const canRecord = navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext);
+    if (state.config.server_stt && canRecord) return "server";
+    return "unsupported";
   }
 
   function micProblem() {
@@ -127,11 +133,11 @@
     if (mode === "insecure") {
       if (state.config.https_port) {
         const url = `https://${location.hostname}:${state.config.https_port}/`;
-        return { text: "The microphone only works on the secure address. Open ", link: url, after: " or type your idea instead." };
+        return { text: "The microphone only works on the secure address. Open ", link: url, after: " or type instead." };
       }
-      return { text: "The microphone needs a secure (https) address. Type your idea instead." };
+      return { text: "The microphone needs a secure (https) address, which is not set up yet. Type your idea instead." };
     }
-    if (mode === "unsupported") return { text: "This browser can't record here. Type your idea instead." };
+    if (mode === "unsupported") return { text: "This browser can't turn speech into text. Type your idea instead." };
     return null;
   }
 
@@ -149,24 +155,235 @@
     }
   }
 
+  function encodeWav(chunks, sampleRate) {
+    const length = chunks.reduce((n, c) => n + c.length, 0);
+    const input = new Float32Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { input.set(chunk, offset); offset += chunk.length; }
+    // Downsample to 16 kHz, which is what whisper expects, by averaging neighbouring samples.
+    const target = 16000;
+    const ratio = sampleRate / target;
+    const outLength = Math.floor(input.length / ratio);
+    const view = new DataView(new ArrayBuffer(44 + outLength * 2));
+    const text = (pos, s) => { for (let i = 0; i < s.length; i++) view.setUint8(pos + i, s.charCodeAt(i)); };
+    text(0, "RIFF"); view.setUint32(4, 36 + outLength * 2, true); text(8, "WAVE"); text(12, "fmt ");
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, target, true); view.setUint32(28, target * 2, true); view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true); text(36, "data"); view.setUint32(40, outLength * 2, true);
+    for (let i = 0; i < outLength; i++) {
+      const from = Math.floor(i * ratio);
+      const to = Math.min(input.length, Math.floor((i + 1) * ratio));
+      let sum = 0;
+      for (let j = from; j < to; j++) sum += input[j];
+      const sample = Math.max(-1, Math.min(1, to > from ? sum / (to - from) : 0));
+      view.setInt16(44 + i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    }
+    return view.buffer;
+  }
+
   /** Wire one microphone button to one text field. */
   function attachMic({ button, bars, status, field, maxChars, readyHint }) {
-    const mic = window.StoryListen ? window.StoryListen.attach({
-      button, field, maxChars,
-      say: (text, problem) => showMicStatus(status, text, problem),
-      heard: () => showMicStatus(status, readyHint),
-      before: () => narrator.pause(), // never record the narrator's own voice
-      onState: (mode) => { if (bars) bars.classList.toggle("on", mode === "listening"); },
-    }) : { stop() {} };
+    let listening = false;
+    let latched = false;      // a quick tap keeps listening until the next tap
+    let pressedAt = 0;
+    let session = 0;          // guards against late events from an earlier recording
+    let recognition = null;
+    let recorder = null;
+    let baseText = "";
+    let heard = "";
+
+    const joined = (a, b) => (a && b ? `${a.replace(/\s+$/, "")} ${b}` : a || b).slice(0, maxChars());
+
+    function setListening(on) {
+      listening = on;
+      button.classList.toggle("listening", on);
+      if (bars) bars.classList.toggle("on", on);
+      if (!on) { latched = false; if (bars) bars.classList.remove("live"); }
+    }
+
+    function finished() {
+      setListening(false);
+      button.classList.remove("working");
+      if (heard.trim()) showMicStatus(status, readyHint);
+      else if (!status.classList.contains("problem")) showMicStatus(status, "I didn't hear anything. Hold the microphone while you talk.", true);
+    }
+
+    function startBrowser(mySession) {
+      recognition = new SpeechRecognition();
+      recognition.lang = (navigator.language || "").toLowerCase().startsWith("en") ? navigator.language : "en-US";
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      let finalText = "";
+      recognition.onresult = (event) => {
+        if (mySession !== session) return;
+        let interim = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const piece = event.results[i][0].transcript;
+          if (event.results[i].isFinal) finalText = joined(finalText, piece.trim());
+          else interim += piece;
+        }
+        heard = joined(finalText, interim.trim());
+        field.value = joined(baseText, heard);
+      };
+      recognition.onerror = (event) => {
+        if (mySession !== session) return;
+        const kind = event.error;
+        if (kind === "aborted" || kind === "no-speech") return;
+        if (kind === "not-allowed" || kind === "service-not-allowed") {
+          showMicStatus(status, "The microphone is blocked for this page. Allow it in the browser's address bar, or type instead.", true);
+        } else if (kind === "audio-capture") {
+          showMicStatus(status, "No microphone was found on this device. Type instead.", true);
+        } else if (kind === "network") {
+          micBrowserBroken = true; // this browser needs the internet for recognition and has none
+          showMicStatus(status, micMode() === "server"
+            ? "Speech recognition lost its connection. Hold the microphone again to use the built-in listener."
+            : "This browser needs the internet to understand speech. Type instead.", true);
+        } else {
+          showMicStatus(status, "The microphone stopped unexpectedly. Try again, or type instead.", true);
+        }
+        setListening(false);
+      };
+      recognition.onend = () => {
+        if (mySession !== session) return;
+        if (listening) {
+          // Some browsers stop after a pause even though the button is still held: carry on.
+          baseText = field.value; heard = heard || ""; finalText = "";
+          try { recognition.start(); return; } catch (_) { /* fall through and finish */ }
+        }
+        if (!status.classList.contains("problem")) finished();
+      };
+      try {
+        recognition.start();
+      } catch (_) {
+        showMicStatus(status, "The microphone could not start. Try again, or type instead.", true);
+        setListening(false);
+      }
+    }
+
+    async function startServer(mySession) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      } catch (error) {
+        if (mySession !== session) return;
+        const blocked = error && (error.name === "NotAllowedError" || error.name === "SecurityError");
+        showMicStatus(status, blocked
+          ? "The microphone is blocked for this page. Allow it in the browser's address bar, or type instead."
+          : "No microphone was found on this device. Type instead.", true);
+        setListening(false);
+        return;
+      }
+      if (mySession !== session || !listening) { stream.getTracks().forEach((t) => t.stop()); return; }
+      const context = new Ctx();
+      const source = context.createMediaStreamSource(stream);
+      const node = context.createScriptProcessor(4096, 1, 1);
+      const silent = context.createGain();
+      silent.gain.value = 0;
+      const chunks = [];
+      const barEls = bars ? [...bars.children] : [];
+      if (bars) bars.classList.add("live");
+      node.onaudioprocess = (event) => {
+        const data = event.inputBuffer.getChannelData(0);
+        chunks.push(new Float32Array(data));
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 8) sum += data[i] * data[i];
+        const level = Math.min(1, Math.sqrt(sum / (data.length / 8)) * 6);
+        barEls.forEach((bar, i) => {
+          const shape = 1 - Math.abs(i - (barEls.length - 1) / 2) / barEls.length;
+          bar.style.transform = `scaleY(${Math.max(0.15, level * shape * (0.7 + Math.random() * 0.6))})`;
+        });
+      };
+      source.connect(node); node.connect(silent); silent.connect(context.destination);
+      const limit = setTimeout(() => { if (mySession === session && listening) stop(); }, 60000);
+      recorder = {
+        async finish() {
+          clearTimeout(limit);
+          node.disconnect(); source.disconnect();
+          stream.getTracks().forEach((t) => t.stop());
+          const rate = context.sampleRate;
+          context.close();
+          barEls.forEach((bar) => { bar.style.transform = ""; });
+          if (!chunks.length) { finished(); return; }
+          button.classList.add("working");
+          showMicStatus(status, "Turning your words into text");
+          try {
+            const result = await api("POST", "/api/transcribe", encodeWav(chunks, rate), { raw: true, timeout: 100000 });
+            if (mySession !== session) return;
+            heard = (result.text || "").trim();
+            field.value = joined(baseText, heard);
+            finished();
+          } catch (error) {
+            if (mySession !== session) return;
+            button.classList.remove("working");
+            showMicStatus(status, error.message, true);
+          }
+        },
+      };
+    }
+
+    function start() {
+      const problem = micProblem();
+      if (problem) { showMicStatus(status, problem, true); return; }
+      if (button.classList.contains("working")) return;
+      narrator.pause(); // do not record the narrator's own voice
+      session += 1;
+      baseText = field.value.trim();
+      heard = "";
+      recorder = null;
+      setListening(true);
+      showMicStatus(status, "Listening");
+      if (micMode() === "browser") startBrowser(session);
+      else startServer(session);
+    }
+
+    function stop() {
+      if (!listening) return;
+      setListening(false);
+      if (recognition) { try { recognition.stop(); } catch (_) { finished(); } }
+      if (recorder) { const r = recorder; recorder = null; r.finish(); }
+      else if (micMode() === "server") finished();
+    }
+
+    function press() {
+      if (listening && latched) { stop(); return; }
+      if (listening) return;
+      pressedAt = performance.now();
+      start();
+    }
+    function release() {
+      if (!listening || latched) return;
+      if (performance.now() - pressedAt < 350) {
+        latched = true; // it was a tap, not a hold
+        showMicStatus(status, "Listening. Tap the microphone again when you have finished.");
+      } else {
+        stop();
+      }
+    }
+
+    button.addEventListener("pointerdown", (event) => {
+      if (event.button) return;
+      event.preventDefault();
+      try { button.setPointerCapture(event.pointerId); } catch (_) { /* older browsers */ }
+      press();
+    });
+    button.addEventListener("pointerup", release);
+    button.addEventListener("pointercancel", release);
+    button.addEventListener("contextmenu", (event) => event.preventDefault());
+    button.addEventListener("keydown", (event) => {
+      if ((event.key === " " || event.key === "Enter") && !event.repeat) { event.preventDefault(); press(); }
+    });
+    button.addEventListener("keyup", (event) => {
+      if (event.key === " " || event.key === "Enter") { event.preventDefault(); release(); }
+    });
+
     return {
       refresh() {
-        // No microphone where it cannot work (plain http, an old browser): a friendly line instead.
         const problem = micProblem();
-        button.hidden = Boolean(problem);
-        if (bars) bars.hidden = Boolean(problem);
+        button.classList.toggle("unavailable", Boolean(problem));
         showMicStatus(status, problem || "", Boolean(problem));
       },
-      stop() { mic.stop(); },
+      stop,
     };
   }
 
@@ -1143,12 +1360,12 @@
   const premiseMic = attachMic({
     button: $("premise-mic"), bars: $("premise-bars"), status: $("premise-mic-status"), field: $("premise"),
     maxChars: () => state.config.max_premise_chars,
-    readyHint: "Got it! Check the words, then press Begin the story (or tap the microphone to add more).",
+    readyHint: "Got it. Press Begin the story, or hold the microphone to add more.",
   });
   const ideaMic = attachMic({
     button: $("idea-mic"), bars: null, status: $("idea-mic-status"), field: $("own-idea"),
     maxChars: () => state.config.max_action_chars,
-    readyHint: "Got it! Check the words, then press Make it happen.",
+    readyHint: "Got it. Press Make it happen.",
   });
 
   function readingLevel() {

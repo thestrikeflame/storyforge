@@ -489,22 +489,26 @@
   /* ───────── "Who is this?" ───────── */
 
   $("who-form").addEventListener("submit", (event) => { event.preventDefault(); $("who").blur(); });
-  // Saying it: tap the microphone (static/listen.js); the words land in the box to check. On a page
-  // that is not secure (plain http) there is no microphone, and the box says so when tapped.
-  if (window.StoryListen && window.StoryListen.supported()) {
+  // Saying it: the browser's own speech recognition, where there is one (Chrome, Edge, Safari;
+  // it needs https or localhost). Typing always works, and phone keyboards have a mic too.
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (Recognition && window.isSecureContext) {
     const mic = $("who-mic");
+    let listening = null;
     mic.hidden = false;
-    window.StoryListen.attach({
-      button: mic, field: $("who"), maxChars: () => 60,
-      insteadText: "Type who it is instead.",
-      say: (text) => note(text),
-    });
-  } else {
-    let told = false;
-    $("who").addEventListener("focus", () => {
-      if (told) return;
-      told = true;
-      note(window.isSecureContext ? "This browser can't record here. Type who it is." : "The microphone needs the secure address. Type who it is.");
+    mic.addEventListener("click", () => {
+      if (listening) { listening.stop(); return; }
+      const rec = new Recognition();
+      rec.lang = document.documentElement.lang || "en";
+      rec.interimResults = true;
+      rec.maxAlternatives = 1;
+      rec.onresult = (event) => {
+        $("who").value = Array.from(event.results).map((r) => r[0].transcript).join("").slice(0, 60);
+      };
+      rec.onend = rec.onerror = () => { listening = null; mic.classList.remove("listening"); };
+      listening = rec;
+      mic.classList.add("listening");
+      try { rec.start(); } catch (_) { rec.onend(); }
     });
   }
 

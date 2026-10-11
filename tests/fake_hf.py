@@ -92,22 +92,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
-        try:
-            body = json.loads(raw or b"{}")
-        except ValueError:
-            body = {}  # audio (speech recognition)
+        body = json.loads(self.rfile.read(length) or b"{}")
         if self.path == "/control":
             STATE.update(body)
             return self._json(200, STATE)
         if self.path == "/v1/chat/completions":
             return self.vision(body)
-        if self.path.startswith("/hf-inference/models/"):  # speech recognition (voice input fallback)
-            STATE["asr_requests"] = STATE.get("asr_requests", 0) + 1
-            STATE["asr_path"] = self.path
-            if self.headers.get("Authorization") != "Bearer test-token":
-                return self._json(401, {"error": "Invalid credentials"})
-            return self._json(200, {"text": " A friendly frog with a tiny hat."})
         if self.path.startswith("/v1/text-to-speech/"):
             return self.speech(body)
         if not self.path.endswith("/v1/images/generations"):
