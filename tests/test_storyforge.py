@@ -540,6 +540,11 @@ class Flow(unittest.TestCase):
         # the opening (skippable, once per visit) and the story page's chapter row
         self.assertIn(b"A story is waking up...", body)
         self.assertIn(b'id="chapter-progress"', body)
+        # Page 1's words carry the class "opening" (for the drop cap): no rule may hide a bare .opening,
+        # which the opening animation once did, leaving page 1 blank.
+        import re
+        css = (ROOT / "static" / "style.css").read_text()
+        self.assertIsNone(re.search(r"(^|[\s,}])\.opening\s*[{,:]", css, re.M))
         # no hero drawn on this instance yet: the cover keeps the fox
         self.assertEqual(call("GET", f"{BASE}/api/cover-hero")[0], 404)
         # shown while iOS keeps sound locked until a tap (e.g. straight after Done on /draw)
