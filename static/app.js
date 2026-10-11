@@ -687,6 +687,15 @@
     document.title = story.title ? `${story.title} · StoryForge` : "StoryForge";
     $("prev-page").disabled = state.view <= 0;
     $("next-page").disabled = state.view >= total - 1;
+    // The chapter row on the page: "Chapter n" and one pip per page so far (at most 12).
+    $("chapter-label").textContent = `Chapter ${state.view + 1}`;
+    const progress = $("chapter-progress");
+    const count = Math.min(total, 12);
+    if (progress.children.length !== count) {
+      progress.replaceChildren(...Array.from({ length: count }, () => document.createElement("i")));
+    }
+    [...progress.children].forEach((pip, i) => pip.classList.toggle("active", i <= state.view));
+    progress.setAttribute("aria-label", `Page ${state.view + 1} of ${total}`);
   }
 
   let shownText = null;
@@ -1370,6 +1379,24 @@
     if (event.key === "ArrowRight") showPage(state.view + 1);
   });
 
+  /* The opening (index.html starts it before the first paint): the book opens and its pages flutter,
+   * then the cover. It ends by itself after 3.6 s, or straight away on a tap or a key. */
+  (function opening() {
+    const root = document.documentElement;
+    if (!root.classList.contains("opening")) return;
+    let over = false;
+    const finish = () => {
+      if (over) return;
+      over = true;
+      try { sessionStorage.setItem("storyforge.opened", "1"); } catch (_) { /* no storage */ }
+      root.classList.add("opening-out");
+      setTimeout(() => root.classList.remove("opening", "opening-out"), 450);
+    };
+    setTimeout(finish, 3600);
+    $("opening").addEventListener("click", finish);
+    document.addEventListener("keydown", finish, { once: true });
+  })();
+
   (async function boot() {
     state.muted = recall(STORAGE_MUTED) === "1";
     const level = recall(STORAGE_LEVEL);
@@ -1382,6 +1409,10 @@
       toast("StoryForge is not answering yet. Check that it is running, then reload this page.", true);
     }
     narrator.init();
+    // The most recently drawn hero peeks up on the cover; the fox stays until someone has drawn one.
+    const coverHero = $("cover-hero");
+    coverHero.onload = () => { coverHero.hidden = false; $("menu-fox").hidden = true; };
+    coverHero.src = "/api/cover-hero";
     if (state.config.landing_art) {
       const photo = $("cover-photo");
       photo.onload = () => { photo.hidden = false; $("cover").classList.add("has-photo"); };

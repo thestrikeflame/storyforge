@@ -534,7 +534,14 @@ class Flow(unittest.TestCase):
     def test_01_pages_load(self):
         status, body = call("GET", f"{BASE}/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Start Journey", body)
+        # the title screen: "Draw your hero" first, then "Start with an idea"
+        self.assertIn(b"Draw your hero", body)
+        self.assertIn(b"Start with an idea", body)
+        # the opening (skippable, once per visit) and the story page's chapter row
+        self.assertIn(b"A story is waking up...", body)
+        self.assertIn(b'id="chapter-progress"', body)
+        # no hero drawn on this instance yet: the cover keeps the fox
+        self.assertEqual(call("GET", f"{BASE}/api/cover-hero")[0], 404)
         # shown while iOS keeps sound locked until a tap (e.g. straight after Done on /draw)
         self.assertIn(b'id="tap-to-hear"', body)
         self.assertIn(b"Tap to hear your story!", body)
@@ -1150,6 +1157,16 @@ class DrawnHero(unittest.TestCase):
         self.assertNotIn("The child says", call("GET", f"{HF}/state")[1]["vision_prompt"])
         self.assertNotIn("hero_who", story)
         self.assertIn('id="who"', call("GET", f"{CLOUD}/draw")[1].decode())
+
+    def test_6_the_newest_drawing_peeks_out_of_the_cover(self):
+        first, _ = drawing_payload()
+        call("POST", f"{CLOUD}/api/stories/drawn", first)
+        time.sleep(1.1)  # file times can be coarse
+        newest, hero = drawing_payload()
+        status, _ = call("POST", f"{CLOUD}/api/stories/drawn", newest)
+        self.assertEqual(status, 201)
+        status, png = call("GET", f"{CLOUD}/api/cover-hero")
+        self.assertEqual((status, png), (200, hero))
 
     def test_4_bad_drawings_are_rejected(self):
         payload = drawing_payload()[0]

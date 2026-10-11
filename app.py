@@ -30,7 +30,7 @@ from storyforge import llm, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
 from storyforge.images import ImageWorker, hero_words, preset_backgrounds, worn_or_about_the_hero
-from storyforge.store import (StoryStore, hero_path, new_segment, new_story, segment_view, story_view,
+from storyforge.store import (SESSION_ID, StoryStore, hero_path, new_segment, new_story, segment_view, story_view,
                               words_pending)
 from storyforge.sysinfo import log, memory_mb, setup_logging, timings
 
@@ -723,6 +723,18 @@ async def get_image(story_id: str, index: int):
         raise HTTPException(404, "This page has no picture yet.")
     media = "image/jpeg" if kind == "jpg" else "image/png"
     return FileResponse(path, media_type=media, headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/cover-hero")
+async def cover_hero():
+    """The most recently drawn hero (a transparent PNG from /draw), shown on the cover in place of
+    the illustrated fox. 404 until someone has drawn one; the cover then keeps the fox."""
+    folder = settings.data_dir / "heroes"
+    drawings = [p for p in folder.glob("*.png") if SESSION_ID.match(p.stem)] if folder.is_dir() else []
+    if not drawings:
+        raise HTTPException(404, "No hero has been drawn yet.")
+    newest = max(drawings, key=lambda p: p.stat().st_mtime)
+    return FileResponse(newest, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/stories/{story_id}/hero")
