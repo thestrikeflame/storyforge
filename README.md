@@ -215,7 +215,7 @@ size, style words, memory limit, narration mode, ports. Edit, save, restart.
 
 Each story is a small file in `data/sessions/`, and its pictures are in
 `/home/akw/jetson-ai/generated_images/` with names starting `sf_`. A story survives a browser
-refresh and a restart ("Continue ..." appears under Start Journey). Stories untouched for 14 days
+refresh and a restart ("Continue ..." appears under the cover buttons). Stories untouched for 14 days
 are deleted at start-up, along with their `sf_` pictures. No other files in that folder are touched.
 
 For each story the app keeps: your idea, the title, the main character's look, the setting, every

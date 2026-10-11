@@ -135,33 +135,52 @@ button:disabled { cursor: default; }
   border: var(--border);
   box-shadow: var(--shadow);
   rotate: -2deg;
+  border-radius: 12px 8px 13px 7px / 8px 13px 7px 12px; /* a little uneven, like a cut-out sticker */
 }
 .top-centre { text-align: center; min-width: 0; }
 .top-actions { justify-self: end; display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; justify-content: flex-end; }
 
-.top-landing { display: flex; flex-direction: column; align-items: center; gap: var(--s3); }
+/* The cover's buttons, under the book: "Draw your hero" first, "Start with an idea" beside it. */
+.top-landing {
+  position: relative; z-index: 1;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--s4);
+  margin-top: var(--s4);
+}
+.top-landing #resume { flex-basis: 100%; max-width: max-content; }
 .top-reading { display: none; }
-body[data-view="invite"] .top-landing { visibility: hidden; }
-body[data-view="reading"] .top-landing { display: none; }
+body:not([data-view="landing"]) .top-landing { display: none; }
 body[data-view="reading"] .top-reading { display: block; }
 
 .journey {
+  display: inline-flex; align-items: center; justify-content: center;
   border-radius: 999px;
-  padding: .6em 1.8em;
-  min-height: 3.5rem;
+  padding: .55em 1.8em;
+  min-height: 3.75rem;
   background: var(--coral);
   color: var(--text);
+  text-decoration: none;
   font-size: clamp(1.35rem, 2.4vw, 1.8rem);
   font-weight: 800;
 }
+.ghost.big { min-height: 3.75rem; padding: .55em 1.6em; font-size: clamp(1.15rem, 2vw, 1.4rem); font-weight: 800; }
 
+/* On the cover the book carries the title, so the wordmark is only there for screen readers. */
+body[data-view="landing"] .wordmark {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+body[data-view="landing"] .top { min-height: var(--s4); padding-block: 0; }
+
+/* The story's title with a felt-tip underline (stretched, so its thickness varies like a marker). */
 .story-title {
+  display: inline-block;
   margin: 0;
+  padding: 0 .2em .32em;
   color: var(--text);
   font-size: clamp(1.3rem, 2.4vw, 1.8rem);
   font-weight: 800;
   line-height: 1.2;
   text-wrap: balance;
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 14' preserveAspectRatio='none'><path d='M4 9 Q38 3 78 8 T150 7 Q178 6 196 4' fill='none' stroke='%23f26d6d' stroke-width='5' stroke-linecap='round'/><path d='M30 10 Q70 6 120 9' fill='none' stroke='%23f26d6d' stroke-width='3' stroke-linecap='round'/></svg>") left bottom / 100% .5em no-repeat;
 }
 .page-count { margin: 2px 0 0; color: var(--text-soft); font-size: .95rem; font-weight: 600; }
 
@@ -215,78 +234,60 @@ body[data-view="reading"] .top-reading { display: block; }
 body[data-view="reading"] .stage { justify-content: flex-start; overflow: visible; gap: var(--s5); }
 body[data-view="reading"] .top { min-height: 4.5rem; }
 
-/* the cover: an open book coming to life, as a paper cutout (the inline SVG, restyled here) */
+/* the cover: the book in the middle with the title on it, the tagline under it, then the buttons.
+   A paper cutout drawn with a marker (inline SVG in index.html, a wobble filter on its lines). */
+body[data-view="landing"] .stage { justify-content: center; gap: var(--s3); padding-top: var(--s4); }
 .cover {
-  position: absolute; inset: 0;
+  position: relative;
+  width: min(100%, 780px);
   display: grid; place-items: center;
   pointer-events: none;
   transition: transform .9s var(--ease), opacity .7s var(--ease);
 }
-.cover-art { width: min(100%, 980px); height: 100%; max-height: 78dvh; overflow: visible; }
+.cover-art { width: 100%; height: auto; max-height: 54dvh; overflow: visible; }
 .cover-photo { width: 100%; height: 100%; object-fit: contain; border-radius: var(--radius); border: var(--border); box-shadow: var(--shadow); }
 .cover.has-photo .cover-art { display: none; }
-body[data-view="invite"] .cover { transform: translateY(50%) scale(.86); opacity: .5; }
+body[data-view="invite"] .cover { position: absolute; inset: 0; width: auto; transform: translateY(50%) scale(.86); opacity: .4; }
 body[data-view="reading"] .cover { display: none; }
+.motes { display: none; } /* the old floating dots; the doodles below replaced them */
 
-.cover-art path, .cover-art ellipse, .cover-art circle { stroke-linejoin: round; }
-.cover-art ellipse[fill="#05041a"] { fill: var(--line); opacity: .14; filter: none; }
-.cover-art .light > circle { opacity: .5; }
-.cover-art .rays { opacity: .55; }
-.cover-art .light-front ellipse, .cover-art .light-front > path { display: none; }
-.cover-art path[fill="#3a2563"] { fill: var(--coral); stroke: var(--line); stroke-width: 4; }
-.cover-art path[fill="url(#g-block)"] { fill: var(--sun); stroke: var(--line); stroke-width: 4; }
-.cover-art g[stroke="#9c8656"] { stroke: var(--line); stroke-opacity: .5; }
-.cover-art .leaf > path:first-child { fill: var(--card); stroke: var(--line); stroke-width: 4; }
-.cover-art .leaf > g { stroke: var(--lavender); stroke-opacity: 1; }
-.cover-art .leaf-turn > path:last-child { stroke: var(--line); stroke-width: 2; }
-.cover-art .sparks { fill: var(--teal); stroke: var(--line); stroke-width: 2; }
-.cover-art .sparks path:nth-child(even) { fill: var(--coral); }
-.cover-art .sparks path:nth-child(3) { fill: var(--sun); }
+.cover-art .board { fill: var(--coral); stroke: var(--line); stroke-width: 4; stroke-linejoin: round; }
+.cover-art .block { fill: var(--sun); stroke: var(--line); stroke-width: 4; stroke-linejoin: round; }
+.cover-art .sheet { fill: var(--card); stroke: var(--line); stroke-width: 4.5; stroke-linejoin: round; }
+.cover-art .rule { fill: none; stroke: var(--lavender); stroke-width: 5; stroke-linecap: round; }
+.cover-title text { font-family: var(--ui); font-weight: 800; font-size: 86px; fill: var(--text); letter-spacing: -1px; }
+.cover-title .title-underline { fill: none; stroke: var(--coral); stroke-width: 8; stroke-linecap: round; }
+
+/* Marker doodles: a thick stroke, then a thinner, slightly offset retrace in black. */
+.doodle .ink { fill: none; stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+.doodle .retrace {
+  fill: none; stroke: var(--line); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round;
+  transform: translate(3px, -2px); stroke-dasharray: 48 20 74 34;
+}
+.d1 .ink { stroke: var(--coral); }
+.d2 .ink { stroke: var(--teal); }
+.d3 .ink { stroke: var(--lavender); fill: rgba(168, 139, 234, .35); }
+.d4 .ink { stroke: var(--sun); stroke-width: 8; }
+.d5 .ink { stroke: var(--line); stroke-width: 4; }
+.doodle { transform-box: fill-box; transform-origin: center; animation: jiggle 1.6s steps(1) infinite; }
+.d2 { animation-delay: -.4s; } .d3 { animation-delay: -.8s; } .d4 { animation-delay: -1.2s; } .d5 { animation-delay: -.6s; }
+@keyframes jiggle { 0% { transform: rotate(-3deg); } 50% { transform: rotate(2.5deg) translateY(-2px); } }
 
 .leaf { transform-box: view-box; }
 .leaf-left { transform-origin: 400px 340px; animation: open-left 1.5s var(--ease) both; }
 .leaf-right { transform-origin: 400px 340px; animation: open-right 1.5s var(--ease) both; }
-.leaf-turn { transform-origin: 400px 340px; animation: open-right 1.9s .15s var(--ease) both, flutter 6s 2.2s ease-in-out infinite alternate; }
-.sparks path { transform-box: fill-box; transform-origin: center; animation: twinkle 3.2s ease-in-out infinite alternate; }
-.sparks path:nth-child(2) { animation-delay: -1.1s; } .sparks path:nth-child(3) { animation-delay: -2.2s; }
-.sparks path:nth-child(4) { animation-delay: -.6s; } .sparks path:nth-child(5) { animation-delay: -1.7s; }
-.light { animation: bloom 2.2s .5s ease-out both; transform-box: view-box; transform-origin: 400px 400px; }
-.rays { transform-box: view-box; transform-origin: 400px 392px; animation: sway 11s 2.4s ease-in-out infinite alternate; }
-
+.cover-title { animation: settle .6s 1.2s var(--ease) both; }
 @keyframes open-left { from { transform: scaleX(.04); } to { transform: none; } }
 @keyframes open-right { from { transform: scaleX(.04); } to { transform: none; } }
-@keyframes flutter { from { transform: none; } to { transform: scaleX(.8) skewY(-2deg); } }
-@keyframes twinkle { from { transform: scale(.7) rotate(0); } to { transform: scale(1.15) rotate(20deg); } }
-@keyframes bloom { from { opacity: 0; transform: scale(.55); } to { opacity: 1; transform: none; } }
-@keyframes sway { from { transform: rotate(-2.2deg); } to { transform: rotate(2.2deg); } }
-
-/* confetti dots floating up from the book */
-.motes { position: absolute; inset: 0; overflow: hidden; }
-.motes i {
-  position: absolute; left: var(--x); bottom: 34%;
-  width: calc(var(--d) + 6px); height: calc(var(--d) + 6px); border-radius: 50%;
-  background: var(--sun);
-  border: 2px solid var(--line);
-  opacity: 0;
-  animation: rise var(--t) var(--wait) linear infinite;
-}
-.motes i:nth-child(3n+1) { background: var(--coral); }
-.motes i:nth-child(3n+2) { background: var(--teal); }
-@keyframes rise {
-  0% { transform: translate(0, 0) scale(.4); opacity: 0; }
-  12% { opacity: 1; }
-  70% { opacity: .8; }
-  100% { transform: translate(var(--drift), -52vh) scale(1); opacity: 0; }
-}
 
 .cover-line {
-  position: absolute; left: 0; right: 0; bottom: var(--s5);
-  margin: 0 auto; padding: 0 var(--s5);
-  max-width: 40ch;
+  position: relative; z-index: 1;
+  margin: 0; padding: 0 var(--s4);
+  max-width: 30ch;
   text-align: center; text-wrap: balance;
   color: var(--text);
-  font-size: 1.15rem; font-weight: 700;
-  animation: settle 1s 1.6s var(--ease) both;
+  font-size: clamp(1.45rem, 3.2vw, 2.1rem); font-weight: 800; line-height: 1.2;
+  animation: settle .8s 1s var(--ease) both;
 }
 body:not([data-view="landing"]) .cover-line { display: none; }
 @keyframes settle { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
@@ -300,8 +301,18 @@ body:not([data-view="landing"]) .cover-line { display: none; }
   text-align: center;
   padding: clamp(var(--s5), 3vw, var(--s6));
   background: var(--card);
-  border: var(--border); border-radius: 24px; box-shadow: var(--shadow);
+  border: 3px solid transparent; /* the outline is the hand-drawn layer below */
+  border-radius: 26px 20px 28px 22px / 22px 28px 20px 26px;
+  box-shadow: var(--shadow);
   animation: settle .6s var(--ease) both;
+}
+/* Hand-drawn outlines: the big shapes (the book, the idea card) draw their outline as a separate
+   layer with a slight wobble (#hand in index.html). The layer is only a line: the picture, the
+   hero, the words and every button inside stay crisp and untouched. */
+.invite::before, .book::before {
+  content: ""; position: absolute; inset: -3px; z-index: 5;
+  border: 3px solid var(--line); border-radius: inherit;
+  pointer-events: none; /* its wobble (filter: url(#hand)) is set in index.html, next to the filter */
 }
 .invite h2 {
   margin: 0 0 var(--s3);
@@ -407,9 +418,9 @@ textarea:focus, .own-idea input:focus { outline: none; background: #fffdf3; box-
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  border-radius: 22px;
+  border-radius: 24px 20px 26px 19px / 20px 26px 19px 24px; /* a little uneven, cut by hand */
   background: var(--paper);
-  border: var(--border);
+  border: 3px solid transparent; /* the outline is the hand-drawn layer (.book::before) */
   box-shadow: var(--shadow);
   perspective: 1800px;
 }
@@ -778,7 +789,7 @@ textarea:focus, .own-idea input:focus { outline: none; background: #fffdf3; box-
   position: fixed; z-index: 60; left: 16px; top: 16px;
   width: max-content; max-width: min(22rem, calc(100vw - 32px));
   background: var(--card); color: var(--text);
-  border: var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+  border: var(--border); border-radius: 18px 13px 19px 12px / 13px 19px 12px 18px; box-shadow: var(--shadow);
   padding: .7em .95em;
   font-family: var(--ui); font-size: 1.08rem; line-height: 1.45;
   animation: bubble-in .18s var(--ease);
@@ -860,7 +871,7 @@ textarea:focus, .own-idea input:focus { outline: none; background: #fffdf3; box-
   position: fixed; left: 50%; bottom: var(--s5); transform: translateX(-50%);
   max-width: min(92vw, 34rem);
   background: var(--card); color: var(--text);
-  border: var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+  border: var(--border); border-radius: 18px 13px 19px 12px / 13px 19px 12px 18px; box-shadow: var(--shadow);
   padding: .75em 1.2em;
   font-weight: 700;
   text-align: center; text-wrap: balance;
@@ -883,7 +894,7 @@ textarea:focus, .own-idea input:focus { outline: none; background: #fffdf3; box-
   .picture { max-width: min(512px, 100%); }
   .words { font-size: 1.14rem; max-width: none; }
   .turn { display: none; }
-  .cover-art { max-height: 62dvh; }
+  .cover-art { max-height: 50dvh; }
   body[data-view="invite"] .stage { justify-content: flex-start; padding-top: var(--s4); }
   body[data-view="invite"] .cover { opacity: .2; }
 }
@@ -895,6 +906,9 @@ textarea:focus, .own-idea input:focus { outline: none; background: #fffdf3; box-
   #narration-toggle-label { display: none; }
   .icon-button { padding: .5em .7em; }
   .invite { padding: var(--s5) var(--s4); }
+  .top-landing { flex-direction: column; align-items: stretch; width: 100%; max-width: 22rem; }
+  .top-landing #resume { max-width: none; }
+  .cover-art { max-height: 44dvh; }
 }
 @media (max-height: 640px) and (min-width: 861px) {
   .mic { width: 5rem; height: 5rem; }

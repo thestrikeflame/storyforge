@@ -534,7 +534,8 @@ class Flow(unittest.TestCase):
     def test_01_pages_load(self):
         status, body = call("GET", f"{BASE}/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Start Journey", body)
+        self.assertIn(b"Draw your hero", body)
+        self.assertIn(b"Start with an idea", body)
         # shown while iOS keeps sound locked until a tap (e.g. straight after Done on /draw)
         self.assertIn(b'id="tap-to-hear"', body)
         self.assertIn(b"Tap to hear your story!", body)
