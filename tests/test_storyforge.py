@@ -258,6 +258,60 @@ class LedStrip(unittest.TestCase):
         os.close(master)
         os.close(slave)
 
+    def test_opening_never_holds_the_esp32_in_its_bootloader(self):
+        import serial
+        from storyforge import leds
+        steps: list[str] = []
+
+        class Recorder:  # stands in for serial.Serial and records what happens, in order
+            def __init__(self, *args, **kwargs):
+                steps.append(f"created port={kwargs.get('port') or (args[0] if args else None)}")
+                self.port = None
+                self.lines = [b"rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\r\n", b"READY\r\n"]
+
+            def __setattr__(self, name, value):
+                if name in ("dtr", "rts", "port"):
+                    steps.append(f"{name}={value}")
+                object.__setattr__(self, name, value)
+
+            def open(self):
+                steps.append("open")
+
+            def reset_input_buffer(self):
+                pass
+
+            def readline(self):
+                return self.lines.pop(0) if self.lines else b""
+
+            def close(self):
+                steps.append("close")
+
+        real = serial.Serial
+        serial.Serial = Recorder
+        try:
+            board = leds.Board("/dev/ttyUSB7")
+        finally:
+            serial.Serial = real
+        self.assertTrue(board.ready)
+        self.assertEqual(steps[0], "created port=None")  # no port yet: creating it opens nothing
+        opened = steps.index("open")
+        self.assertLess(steps.index("dtr=False"), opened)  # released before opening
+        self.assertLess(steps.index("rts=False"), opened)
+        self.assertLess(steps.index("port=/dev/ttyUSB7"), opened)
+        after = steps[opened + 1:]
+        self.assertEqual(after[:3], ["dtr=False", "rts=True", "rts=False"])  # a clean reset into the sketch
+        self.assertNotIn("dtr=True", steps)
+        self.assertEqual(board.received[-1], "READY")
+
+    def test_no_ready_says_what_the_board_said(self):
+        from storyforge import leds
+        boot = leds.ready_problem(["rst:0x1 (POWERON_RESET),boot:0x3 (DOWNLOAD_BOOT(UART0/UART1))",
+                                   "waiting for download"])
+        self.assertIn("bootloader (download mode)", boot)
+        self.assertIn("waiting for download", boot)
+        self.assertIn("brownout", leds.ready_problem(["Brownout detector was triggered"]))
+        self.assertIn("said nothing", leds.ready_problem([]))
+
     def test_without_a_board_nothing_happens(self):
         from storyforge import leds
         strip = leds.Strip(count=30, enabled=True, port="/nonexistent/ttyUSB9")
