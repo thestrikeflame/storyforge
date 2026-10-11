@@ -172,7 +172,17 @@
         <div class="hero-fx" id="hero-fx" aria-hidden="true"></div>
         <div class="painting" id="painting">
           <div class="wash" aria-hidden="true"><i></i><i></i><i></i></div>
-          <p class="painting-label" id="painting-label">Painting this page</p>
+          <!-- The rotating, playful lines are for the eyes only (app.js "paintTalk"): screen readers
+               get one steady line, and narration never reads them. -->
+          <p class="painting-label" id="painting-label">
+            <svg class="painting-doodle" viewBox="0 0 32 32" aria-hidden="true">
+              <path d="M21.5 4.5l6 6-11 11-6-6z" fill="#ffde5a" stroke="#5b3a49" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M10.5 15.5l6 6-2.4 2.4c-1.4 1.4-3.7 1.4-5.1 0l-.9-.9c-1.4-1.4-1.4-3.7 0-5.1z" fill="#c8b6a6" stroke="#5b3a49" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M8.6 23.4c-1.9 1.9-3.9 2.1-5.1 4.1 2.3.5 5.5.1 7.6-2" fill="#ff524d" stroke="#5b3a49" stroke-width="2" stroke-linejoin="round"/>
+            </svg>
+            <span class="painting-words" id="painting-words" aria-hidden="true">Painting this page</span>
+            <span class="visually-hidden" id="painting-said">Painting this page</span>
+          </p>
           <div class="meter" role="progressbar" aria-label="Picture progress" aria-valuemin="0" aria-valuemax="100" id="picture-meter"><span id="picture-meter-fill"></span></div>
           <p class="painting-eta" id="painting-eta"></p>
         </div>

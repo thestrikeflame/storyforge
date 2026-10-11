@@ -868,6 +868,104 @@
   // Set in JS, not the stylesheet: a url(#id) in an external stylesheet may look for the filter there.
   $("hero-img").style.filter = "url(#line-boil)";
 
+  /* While a picture is painted: playful lines, every 2.5 s, in a shuffled order with no repeats until
+   * all have been shown, a gentle fade between them. A few are about this page's place and the hero,
+   * when those are known. On screen only: narration never reads them, screen readers get one line. */
+  const PAINT_LINES = [
+    "Mixing the paints…", "Sharpening the colored pencils…", "Painting the sky…", "Sprinkling in some sunshine…",
+    "Planting the trees…", "Waking up the clouds…", "Shooing a sleepy cat off the page…",
+    "Finding the right shade of blue…", "Asking the moon to hold still…", "Drawing the last little details…",
+    "Letting the paint dry (no peeking!)…", "Turning on the lights in the story…",
+  ];
+  // Words that start sentences but are not names ("Once upon a time", "The...").
+  const NOT_NAMES = new Set(["The", "Once", "One", "In", "On", "At", "A", "An", "It", "There", "When", "Long", "Every",
+    "Deep", "High", "Far", "Today", "Yesterday", "Under", "Inside", "Outside", "Near", "As", "With", "Far", "Just", "So"]);
+
+  // The page's place in a few words: "a sunny sandy beach beside a red lighthouse" -> "a sunny sandy beach".
+  function shortSetting(text) {
+    let place = (text || "").replace(/[.!?]+$/, "").trim();
+    if (!place) return "";
+    const cut = place.slice(1).search(/,|\s(?:with|where|at|under|near|beside|by|on|in|during|while|filled|full|and)\s/i);
+    if (cut > 0) place = place.slice(0, cut + 1);
+    place = place.split(/\s+/).slice(0, 5).join(" ");
+    if (!/^(a|an|the|my|your)\s/i.test(place)) place = `the ${place}`;
+    return place;
+  }
+
+  // The hero's name, when page 1 starts with one that comes up again in the story.
+  function heroName() {
+    const pages = (state.story && state.story.pages) || [];
+    const first = ((pages[0] && pages[0].text) || "").trim().match(/^([A-Z][a-z]{2,14})\b/);
+    if (!first || NOT_NAMES.has(first[1])) return "";
+    const all = pages.map((p) => p.text || "").join(" ");
+    return (all.match(new RegExp(`\\b${first[1]}\\b`, "g")) || []).length >= 2 ? first[1] : "";
+  }
+
+  const paintTalk = {
+    key: null,
+    timer: null,
+    bag: [],
+    last: "",
+
+    // Called on every picture render: runs while this page's picture is queued or painting.
+    sync(status, page) {
+      if (status !== "queued" && status !== "generating") { this.stop(); return; }
+      const key = `${state.story.id}:${page.index}`;
+      if (this.key === key && this.timer) return;
+      this.stop();
+      this.key = key;
+      this.bag = [];
+      this.show(this.next(page), false);
+      this.timer = setInterval(() => {
+        const current = currentPage();
+        if (current) this.show(this.next(current), true);
+      }, 2500);
+    },
+
+    lines(page) {
+      const place = shortSetting(page.image && page.image.alt);
+      const hero = heroName();
+      const own = [];
+      if (place) own.push(`Painting ${place}…`);
+      if (place && hero) own.push(`Getting ${place} ready for ${hero}…`);
+      if (hero) own.push(`${hero} is waiting by the edge of the page…`);
+      return PAINT_LINES.concat(own);
+    },
+
+    next(page) {
+      if (!this.bag.length) {
+        this.bag = this.lines(page);
+        for (let i = this.bag.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [this.bag[i], this.bag[j]] = [this.bag[j], this.bag[i]];
+        }
+        if (this.bag[0] === this.last && this.bag.length > 1) this.bag.push(this.bag.shift()); // never twice in a row
+      }
+      this.last = this.bag.shift();
+      return this.last;
+    },
+
+    show(text, fade) {
+      const words = $("painting-words");
+      clearTimeout(this.fadeTimer);
+      if (!fade || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        words.classList.remove("fading");
+        words.textContent = text;
+        return;
+      }
+      words.classList.add("fading");
+      this.fadeTimer = setTimeout(() => { words.textContent = text; words.classList.remove("fading"); }, 300);
+    },
+
+    stop() {
+      clearInterval(this.timer);
+      clearTimeout(this.fadeTimer);
+      this.timer = null;
+      this.key = null;
+      $("painting-words").classList.remove("fading");
+    },
+  };
+
   function renderPicture() {
     const page = currentPage();
     const figure = $("picture");
@@ -877,6 +975,7 @@
     if (page.status === "ready" && status === "none") status = state.config.images ? "queued" : "skipped";
     if (page.status === "failed") status = "waiting";
     if (page.pictureBroken) status = "failed";
+    paintTalk.sync(status, page); // the playful lines while it is painted
 
     $("picture-meter-fill").style.transform = `scaleX(${status === "generating" ? image.progress || 0.02 : 0})`;
     $("picture-meter").setAttribute("aria-valuenow", String(Math.round((image.progress || 0) * 100)));
@@ -924,11 +1023,11 @@
     figure.dataset.state = status;
     if (heroAnimator) heroAnimator.stop();
     if (status === "waiting") {
-      $("painting-label").textContent = page.status === "failed" ? "No picture yet" : "The picture comes after the words";
-    } else if (status === "queued") {
-      $("painting-label").textContent = "Getting the paints ready";
-    } else if (status === "generating") {
-      $("painting-label").textContent = "Painting this page";
+      const line = page.status === "failed" ? "No picture yet" : "The picture comes after the words";
+      $("painting-words").textContent = line;
+      $("painting-said").textContent = line;
+    } else if (status === "queued" || status === "generating") {
+      $("painting-said").textContent = "Painting this page"; // the playful lines rotate on screen (paintTalk)
     }
     const eta = friendlyDuration(image.eta_seconds);
     $("painting-eta").textContent = eta ? `Pictures take ${eta} here.` : "";
