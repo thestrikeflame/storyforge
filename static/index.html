@@ -8,6 +8,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Chewy&display=swap">
+  <!-- The StoryForge title's own font, served from here (static/fonts/Caprasimo-OFL.txt). -->
+  <link rel="preload" href="/static/fonts/caprasimo-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/style.css">
   <script>
     // The opening (a storybook opening itself) plays once per visit, before anything is drawn, so
@@ -104,8 +106,8 @@
           <h2 class="title-word">
             <!-- Tapping the title plays the opening again (app.js). -->
             <button class="title-replay" id="title-replay" type="button" aria-label="StoryForge. Play the opening again">
-              <span class="rainbow-word" aria-hidden="true"><i>S</i><i>t</i><i>o</i><i>r</i><i>y</i></span>
-              <span class="rainbow-word short" aria-hidden="true"><i>F</i><i>o</i><i>r</i><i>g</i><i>e</i></span>
+              <span class="title-line" aria-hidden="true">Story</span>
+              <span class="title-line" aria-hidden="true">Forge</span>
             </button>
           </h2>
           <p class="cover-line" id="cover-line">Draw a hero. Watch it come alive.</p>
