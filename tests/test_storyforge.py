@@ -1218,13 +1218,16 @@ class DrawnHero(unittest.TestCase):
 
     def test_6_the_newest_drawing_peeks_out_of_the_cover(self):
         first, _ = drawing_payload()
-        call("POST", f"{CLOUD}/api/stories/drawn", first)
+        status, older = call("POST", f"{CLOUD}/api/stories/drawn", first)
         time.sleep(1.1)  # file times can be coarse
         newest, hero = drawing_payload()
-        status, _ = call("POST", f"{CLOUD}/api/stories/drawn", newest)
+        status, story = call("POST", f"{CLOUD}/api/stories/drawn", newest)
         self.assertEqual(status, 201)
         status, png = call("GET", f"{CLOUD}/api/cover-hero")
         self.assertEqual((status, png), (200, hero))
+        # let both stories finish, so the tests after this one find the writer free
+        wait_ready(older["id"], 0, CLOUD)
+        wait_ready(story["id"], 0, CLOUD)
 
     def test_4_bad_drawings_are_rejected(self):
         payload = drawing_payload()[0]
