@@ -20,6 +20,7 @@ the page and a name, which StoryForge must leave out.
 POST /control {"define_delay": seconds per piece, "define_mode": "normal" | "garbage"}.
 Story outline requests (system prompt about planning adventures) are answered with OUTLINE and
 counted separately too; POST /control {"outline_mode": "garbage"} makes them unusable.
+POST /control {"rough_pages": n} adds a not-gentle sentence to the next n pages.
 """
 import json
 import sys
@@ -30,12 +31,13 @@ STATE = {"mode": "normal", "delay": 0.01, "requests": 0, "last_user": "", "last_
          "ignore_choice": 0, "last_schema": None, "short_pages": 0, "short_words": 8, "cut_off_pages": 0,
          "last_system": "", "define_requests": 0, "define_cancelled": 0, "define_delay": 0.002,
          "define_mode": "normal", "last_define_user": "",
-         "outline_requests": 0, "outline_mode": "normal", "last_outline_user": ""}
+         "outline_requests": 0, "outline_mode": "normal", "last_outline_user": "", "rough_pages": 0}
 OUTLINE = {
     "hero_name": "Mira", "hero_kind": "baby dragon",
     "goal": "find the lost moon pearl and bring it home",
     "obstacle": "a sleepy river has washed over the stepping stones",
     "friends": [{"name": "Pim", "kind": "silver moth"}, {"name": "Olo", "kind": "old owl"}],
+    "goal_done": "Mira finds the moon pearl hidden in a shell and names it Shimmer",
     "ending": "Mira returns the moon pearl and the whole wood glows with silver light",
 }
 
@@ -124,6 +126,9 @@ def build_reply(user_text: str, event: str | None = None) -> dict:
             STATE["ignore_choice"] -= 1
         else:
             reply["segment"] = f"Mira chose to {event[0].lower() + event[1:]}. " + reply["segment"]
+    if STATE["rough_pages"] > 0:
+        STATE["rough_pages"] -= 1
+        reply["segment"] = "Then the two dragons began to fight in the meadow. " + reply["segment"]
     if STATE["short_pages"] > 0:
         STATE["short_pages"] -= 1
         reply["segment"] = " ".join(reply["segment"].split()[: STATE["short_words"]])
