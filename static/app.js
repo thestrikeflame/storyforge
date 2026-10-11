@@ -85,8 +85,21 @@
     $("next").hidden = name !== "reading";
     $("leave").hidden = name !== "reading";
     $("narration-toggle").hidden = name !== "reading" || narrator.mode === "none";
-    if (name !== "reading") narrator.stop();
+    if (name !== "reading") { narrator.stop(); ledPage(null, null); }
     window.scrollTo(0, 0);
+  }
+
+  /* The LED strip behind the book takes the colours of the picture on show (a gentle glow with no
+   * story open). Fire and forget: without a strip the server simply does nothing. */
+  let ledShown = "";
+  function ledPage(storyId, index) {
+    const key = `${storyId}:${index}`;
+    if (key === ledShown) return;
+    ledShown = key;
+    fetch("/api/led/page", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ story_id: storyId, page: index }),
+    }).catch(() => { ledShown = ""; });
   }
 
   function friendlyDuration(seconds) {
@@ -786,6 +799,7 @@
         if (heroUrl && hero.getAttribute("src") !== heroUrl) hero.src = heroUrl;
         if (!heroUrl) hero.removeAttribute("src");
         figure.dataset.state = "completed";
+        ledPage(storyId, index);
         shownProps = (page.props || []).map((p) => p.emoji).join("");
         if (heroAnimator) {
           if (heroUrl) heroAnimator.set(page.hero_action || "standing", page.props || []);

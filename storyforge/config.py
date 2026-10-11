@@ -107,6 +107,13 @@ class Settings:
     whisper_cli: Path = Path(_get("WHISPER_CLI", "/home/akw/jetson-ai/whisper.cpp/build/bin/whisper-cli"))
     whisper_model: Path = Path(_get("WHISPER_MODEL", "/home/akw/jetson-ai/whisper.cpp/models/ggml-base.en.bin"))
 
+    # The LED strip behind the book (an ESP32 on USB serial; storyforge/leds.py). Without one, nothing happens.
+    led_enabled: bool = _get("LED_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+    led_count: int = _int("LED_COUNT", 30, 1, 300)
+    led_reverse: bool = _get("LED_REVERSE", "false").lower() in ("1", "true", "yes", "on")
+    led_brightness: float = _float("LED_BRIGHTNESS", 0.4, 0.0, 1.0)
+    led_port: str = _get("LED_PORT", "")  # empty: the first /dev/ttyUSB* or /dev/ttyACM*
+
     host: str = _get("HOST", "0.0.0.0")
     port: int = _int("PORT", 8000, 1, 65535)
     https_port: int = _int("HTTPS_PORT", 8443, 0, 65535)

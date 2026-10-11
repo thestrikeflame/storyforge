@@ -101,6 +101,7 @@ def setUpModule():
         SD_CLI=str(ROOT / "tests" / "fake_sd_cli"), SD_MODEL=str(ROOT / "tests" / "fake_sd_cli"),
         IMAGE_DIR=str(TMP / "images"), DATA_DIR=str(TMP / "data"), LOG_DIR=str(TMP / "logs"),
         CERT_DIR=str(TMP / "certs"), SD_STEPS="8", SD_MIN_FREE_MB="0", TTS_MODE="browser",
+        LED_ENABLED="0",  # never the real ESP32 on /dev/ttyUSB*
         FAKE_SD_STEP_SECONDS="0.05", FAKE_SD_FAIL_FILE=str(FAIL_FILE), FAKE_SD_LOG=str(SD_LOG),
         LLM_TIMEOUT_SECONDS="20",
         SD_LCM_LORA=str(FAST_DIR / "lcm-lora-sdv1-5.safetensors"), SD_TAESD=str(FAST_DIR / "taesd.safetensors"),
@@ -149,6 +150,141 @@ def tearDownModule():
         print(f"test files kept in {TMP}", file=sys.stderr)
     else:
         shutil.rmtree(TMP, ignore_errors=True)
+
+
+class LedStrip(unittest.TestCase):
+    """Colours for the LED strip from a page background, and the ESP32 protocol (a fake board on a
+    pseudo-terminal; the real one on /dev/ttyUSB* is never touched)."""
+
+    @staticmethod
+    def picture(rows):
+        """A 200x300 picture made of horizontal stripes: [(share of the height, colour), ...]."""
+        from PIL import Image, ImageDraw
+        image = Image.new("RGB", (200, 300))
+        draw = ImageDraw.Draw(image)
+        top = 0
+        for share, color in rows:
+            draw.rectangle([0, top, 199, top + round(300 * share)], fill=color)
+            top += round(300 * share)
+        return image
+
+    def test_bands_follow_the_picture_top_to_bottom_and_edges_stay_sharp(self):
+        from storyforge import leds
+        sky, grass = (90, 160, 235), (60, 170, 70)
+        image = self.picture([(0.5, sky), (0.5, grass)])
+        raw = leds.smooth(leds.boost_saturation(leds.band_colors(image, 30)))
+        self.assertEqual(len(raw), 30)
+        self.assertGreater(raw[0][2], raw[0][1])    # blue sky at the top
+        self.assertGreater(raw[29][1], raw[29][2])  # green grass at the bottom
+        # the boundary is not blurred: the LEDs either side keep their own colour
+        self.assertGreater(raw[14][2], raw[14][1])
+        self.assertGreater(raw[15][1], raw[15][2])
+        colors = leds.colors_from_image(image, count=30, brightness=0.4, reverse=False)
+        self.assertTrue(all(0 <= v <= round(255 * 0.4) for c in colors for v in c))  # brightness cap
+        self.assertEqual(leds.colors_from_image(image, count=30, brightness=0.4, reverse=True), colors[::-1])
+
+    def test_saturated_beats_gray_and_colours_are_boosted(self):
+        import numpy as np
+        from storyforge import leds
+        # 60% gray, 40% red in one band: the red wins
+        band = np.array([[128, 128, 128]] * 60 + [[200, 40, 40]] * 40, dtype=float)
+        picked = leds.dominant_color(band)
+        self.assertGreater(picked[0], 150)
+        self.assertLess(picked[1], 80)
+        # but a band that is almost all gray stays gray
+        mostly = np.array([[128, 128, 128]] * 95 + [[200, 40, 40]] * 5, dtype=float)
+        self.assertLess(abs(leds.dominant_color(mostly)[0] - 128), 10)
+        boosted = leds.boost_saturation(np.array([[150.0, 100.0, 100.0]]))[0]
+        self.assertGreater(boosted[0] - boosted[1], 50 * 1.15)  # about 20% more saturated
+        dark = leds.to_strip(np.array([[128.0, 128.0, 128.0]]), 1.0)[0]
+        self.assertLess(dark[0], 64)  # gamma 2.2: half brightness is much less than half power
+
+    def test_smoothing_blends_only_close_neighbours(self):
+        import numpy as np
+        from storyforge import leds
+        colors = np.array([[100, 100, 100], [110, 100, 100], [100, 100, 100], [0, 200, 0]], dtype=float)
+        out = leds.smooth(colors)
+        self.assertLess(out[1][0], 110)                   # the small bump is softened
+        self.assertEqual(list(out[3]), [0.0, 200.0, 0.0])  # the green edge is left alone
+
+    def test_frame_line_and_port_help(self):
+        from storyforge import leds
+        line = leds.frame_line([(1, 2, 3)] * 30)
+        self.assertTrue(line.startswith(b"C,1,2,3,1,2,3"))
+        self.assertTrue(line.endswith(b"\n"))
+        self.assertEqual(line.count(b","), 90)
+        self.assertIn("sudo usermod -aG dialout $USER", leds.permission_help("/dev/ttyUSB0"))
+        self.assertIn("sudo chmod a+rw /dev/ttyUSB0", leds.permission_help("/dev/ttyUSB0"))
+
+    def test_the_strip_waits_for_ready_fades_and_switches_off(self):
+        import os, pty, threading, tty
+        from storyforge import leds
+        master, slave = pty.openpty()
+        tty.setraw(slave)
+        frames: list[bytes] = []
+
+        def board():  # the fake ESP32: READY once the port is open, then OK for every line
+            time.sleep(0.4)
+            os.write(master, b"READY\r\n")
+            buffer = b""
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    frames.append(line)
+                    os.write(master, b"OK\r\n")
+
+        threading.Thread(target=board, daemon=True).start()
+        strip = leds.Strip(count=30, enabled=True, port=os.ttyname(slave))
+        strip.start()
+        wait_for(lambda: strip.describe()["state"] == "ready" and len(frames) >= 3, timeout=15)
+        idle = [int(v) for v in frames[-1].split(b",")[1:]]
+        self.assertEqual(len(idle), 90)
+        self.assertTrue(0 < max(idle) < 60)  # a gentle glow
+        target = [(100, 0, 0)] * 30
+        strip.show(target)
+        wait_for(lambda: frames and frames[-1] == leds.frame_line(target).strip(), timeout=10)
+        reds = [int(f.split(b",")[1]) for f in frames if f.startswith(b"C,") and f.count(b",") == 90]
+        self.assertGreaterEqual(len([r for r in reds if 0 < r < 100]), 3)  # faded in over a few frames
+        strip.stop()
+        self.assertEqual(frames[-1], leds.frame_line([(0, 0, 0)] * 30).strip())  # off on shutdown
+        self.assertEqual(strip.describe()["state"], "off")
+        os.close(master)
+        os.close(slave)
+
+    def test_without_a_board_nothing_happens(self):
+        from storyforge import leds
+        strip = leds.Strip(count=30, enabled=True, port="/nonexistent/ttyUSB9")
+        strip.start()
+        strip.show([(10, 10, 10)] * 30)
+        wait_for(lambda: strip.describe()["state"] == "cannot open", timeout=5)
+        strip.stop()
+        self.assertEqual(leds.Strip(enabled=False).describe()["state"], "off")
+        locked = TMP / "ttyUSB-locked"
+        locked.write_text("")
+        locked.chmod(0)
+        strip = leds.Strip(count=30, enabled=True, port=str(locked))
+        strip.start()
+        wait_for(lambda: strip.describe()["state"] == "no permission", timeout=5)  # logs the fix command
+        strip.stop()
+
+    def test_the_page_endpoint_gives_the_background_colours(self):
+        story_id = new_story()
+        wait_ready(story_id, 0)
+        wait_for(lambda: segment(story_id, 0)["image"]["status"] == "completed", timeout=60)
+        status, body = call("POST", f"{BASE}/api/led/page", {"story_id": story_id, "page": 0})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(body["colors"]), 30)
+        self.assertEqual(body["leds"]["state"], "off")  # LED_ENABLED=0 in the tests
+        self.assertEqual(call("POST", f"{BASE}/api/led/page", {"story_id": None})[1]["colors"], None)
+        self.assertEqual(call("POST", f"{BASE}/api/led/page", {"story_id": story_id, "page": 7})[0], 404)
+        self.assertEqual(call("GET", f"{BASE}/api/health")[1]["leds"]["enabled"], False)
 
 
 class Parsing(unittest.TestCase):

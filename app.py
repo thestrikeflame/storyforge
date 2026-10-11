@@ -19,6 +19,7 @@ import re
 import struct
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
@@ -27,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from storyforge import hf_images, llm, reading, speech, tls_proxy, vision
+from storyforge import hf_images, leds, llm, reading, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
 from storyforge.images import (ImageWorker, cut_out_hero, hero_prompt, hero_words, preset_backgrounds,
@@ -45,6 +46,7 @@ ERRORS = {
 store = StoryStore()
 narrator = speech.Narrator()
 worker = ImageWorker(on_change=lambda story: store.save(story))
+strip = leds.Strip()  # the LED strip behind the book; does nothing without an ESP32
 llm_lock: asyncio.Lock  # one page is written at a time; created at startup
 active_streams: dict[str, llm.LLMStream] = {}
 write_tasks: dict[str, asyncio.Task] = {}
@@ -64,6 +66,7 @@ async def lifespan(_app: FastAPI):
     define_state["task"] = asyncio.create_task(_definer(), name="definer")
     store.cleanup_old()
     await worker.start()
+    strip.start()  # a gentle glow until a page is shown
     https_server = await tls_proxy.start_https_proxy()
     ok, reason = worker.availability()
     mem = memory_mb()
@@ -84,6 +87,7 @@ async def lifespan(_app: FastAPI):
         _stop_defining()
         define_state["task"].cancel()
         await worker.stop()
+        await asyncio.to_thread(strip.stop)  # LEDs off
         if https_server is not None:
             https_server.close()
         for story in store.stories.values():
@@ -864,19 +868,50 @@ async def retry_image(story_id: str, index: int):
 async def get_image(story_id: str, index: int):
     story = _story_or_404(story_id)
     seg = _segment_or_404(story, index)
-    if seg["image"]["status"] == "completed" and seg["image"].get("source") == "preset":
+    path = _background_file(story, seg)
+    if path is None:
+        raise HTTPException(404, "This page has no picture yet.")
+    media = "image/jpeg" if path.suffix == ".jpg" else "image/png"
+    return FileResponse(path, media_type=media, headers={"Cache-Control": "private, max-age=86400"})
+
+
+def _background_file(story: dict, seg: dict) -> Path | None:
+    """The page's finished background on disk, or None."""
+    if seg["image"]["status"] != "completed":
+        return None
+    if seg["image"].get("source") == "preset":
         # Only a name from the known list of preset files is ever served.
-        preset = next((p for p in preset_backgrounds() if p.name == seg["image"].get("file")), None)
-        if preset is None:
-            raise HTTPException(404, "This page has no picture yet.")
-        return FileResponse(preset, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+        return next((p for p in preset_backgrounds() if p.name == seg["image"].get("file")), None)
     # The file name is rebuilt on the server from validated values; the browser never supplies a path.
     kind = "jpg" if str(seg["image"].get("file") or "").endswith(".jpg") else "png"
     path = settings.image_dir / f"sf_{story['id']}_{seg['index']}.{kind}"
-    if seg["image"]["status"] != "completed" or not path.is_file():
-        raise HTTPException(404, "This page has no picture yet.")
-    media = "image/jpeg" if kind == "jpg" else "image/png"
-    return FileResponse(path, media_type=media, headers={"Cache-Control": "private, max-age=86400"})
+    return path if path.is_file() else None
+
+
+class LedPage(BaseModel):
+    story_id: str | None = None  # None: no story is open (the gentle glow)
+    page: int | None = None
+
+
+@app.post("/api/led/page")
+async def led_page(body: LedPage):
+    """The browser shows a page (or no story): the LED strip takes the colours of its background,
+    top to bottom, fading from the previous ones. A page without a finished picture changes nothing."""
+    story = store.get(body.story_id) if body.story_id else None
+    if story is None or body.page is None:
+        strip.idle()
+        return _no_store({"leds": strip.describe(), "colors": None})
+    seg = _segment_or_404(story, body.page)
+    path = _background_file(story, seg)
+    if path is None:
+        return _no_store({"leds": strip.describe(), "colors": None})
+    try:
+        colors = await asyncio.to_thread(leds.colors_from_image, path)
+    except (OSError, ValueError) as exc:
+        log.warning("LED colours failed  story=%s page=%d  (%s)", story["id"], seg["index"] + 1, exc)
+        return _no_store({"leds": strip.describe(), "colors": None})
+    strip.show(colors)
+    return _no_store({"leds": strip.describe(), "colors": colors})
 
 
 @app.get("/api/cover-hero")
@@ -1017,6 +1052,7 @@ async def health():
             "options_checked_against_help": worker.help_checked,
         },
         "narration": speech.tts_mode(),
+        "leds": strip.describe(),
         "offline_voice_input": speech.stt_available(),
         "https_for_microphone": tls_proxy.https_ready(),
         "memory_mb": memory_mb(),
