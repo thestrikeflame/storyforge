@@ -104,8 +104,13 @@ class Settings:
     elevenlabs_url: str = _get("ELEVENLABS_URL", "https://api.elevenlabs.io").rstrip("/")
     elevenlabs_timeout: int = _int("ELEVENLABS_TIMEOUT_SECONDS", 10, 2, 60)
 
-    whisper_cli: Path = Path(_get("WHISPER_CLI", "/home/akw/jetson-ai/whisper.cpp/build/bin/whisper-cli"))
+    # Voice input (storyforge/listen.py): whisper.cpp's server, kept warm; Hugging Face's Whisper as fallback.
+    whisper_server: Path = Path(_get("WHISPER_SERVER", "/home/akw/jetson-ai/whisper.cpp/build/bin/whisper-server"))
     whisper_model: Path = Path(_get("WHISPER_MODEL", "/home/akw/jetson-ai/whisper.cpp/models/ggml-base.en.bin"))
+    whisper_port: int = _int("WHISPER_PORT", 8178, 1, 65535)
+    ffmpeg: Path = Path(_get("FFMPEG", "/home/akw/.local/bin/ffmpeg"))
+    hf_asr_model: str = _get("HF_ASR_MODEL", "openai/whisper-large-v3-turbo")
+    listen_timeout: int = _int("LISTEN_TIMEOUT_SECONDS", 20, 5, 120)
 
     host: str = _get("HOST", "0.0.0.0")
     port: int = _int("PORT", 8000, 1, 65535)

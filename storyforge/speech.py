@@ -1,7 +1,5 @@
-"""Narration (ElevenLabs in the cloud, or Piper on the Jetson) and optional offline voice input
-(whisper.cpp).
-
-All are optional. Without a recording the browser's built-in voice reads the story.
+"""Narration: ElevenLabs in the cloud, or Piper on the Jetson. Both are optional; without a
+recording the browser's built-in voice reads the story. (Voice input is in listen.py.)
 Without whisper.cpp the browser's built-in speech recognition is used where it exists.
 """
 from __future__ import annotations
@@ -43,14 +41,6 @@ def tts_mode() -> str:
     if mode == "piper":
         log.warning("TTS_MODE=piper but Piper or its voice file was not found; using the browser voice")
     return "browser"
-
-
-def stt_available() -> bool:
-    return (
-        settings.whisper_cli.is_file()
-        and os.access(settings.whisper_cli, os.X_OK)
-        and settings.whisper_model.is_file()
-    )
 
 
 RECORDED = ("elevenlabs", "piper")  # modes where the server makes a recording for each page
@@ -211,33 +201,3 @@ class Narrator:
             seconds = round(time.monotonic() - started, 1)
             log.info("narration ready  story=%s page=%d  %.1fs", story_id, index + 1, seconds)
             timings.record("narration", seconds=seconds, characters=len(text))
-
-
-_stt_lock = asyncio.Lock()
-
-
-async def transcribe(wav_bytes: bytes) -> str:
-    """Turn a short 16 kHz mono WAV recording into text with whisper.cpp."""
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    wav = AUDIO_DIR / f"mic_{os.getpid()}_{time.monotonic_ns()}.wav"
-    wav.write_bytes(wav_bytes)
-    try:
-        async with _stt_lock:
-            proc = await asyncio.create_subprocess_exec(
-                str(settings.whisper_cli), "-m", str(settings.whisper_model),
-                "-f", str(wav), "--no-timestamps", "--no-prints", "--language", "en",
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=90)
-        if proc.returncode != 0:
-            log.error("voice input failed: %s", err.decode("utf-8", "replace")[-400:])
-            raise RuntimeError("whisper failed")
-        text = " ".join(out.decode("utf-8", "replace").split())
-        # whisper marks silence like [BLANK_AUDIO] or (silence)
-        if text.startswith(("[", "(")) and text.endswith(("]", ")")):
-            return ""
-        return text
-    finally:
-        wav.unlink(missing_ok=True)

@@ -99,6 +99,7 @@ def setUpModule():
         SD_CLI=str(ROOT / "tests" / "fake_sd_cli"), SD_MODEL=str(ROOT / "tests" / "fake_sd_cli"),
         IMAGE_DIR=str(TMP / "images"), DATA_DIR=str(TMP / "data"), LOG_DIR=str(TMP / "logs"),
         CERT_DIR=str(TMP / "certs"), SD_STEPS="8", SD_MIN_FREE_MB="0", TTS_MODE="browser",
+        WHISPER_SERVER=str(TMP / "no-whisper-here"),
         FAKE_SD_STEP_SECONDS="0.05", FAKE_SD_FAIL_FILE=str(FAIL_FILE), FAKE_SD_LOG=str(SD_LOG),
         LLM_TIMEOUT_SECONDS="20",
         SD_LCM_LORA=str(FAST_DIR / "lcm-lora-sdv1-5.safetensors"), SD_TAESD=str(FAST_DIR / "taesd.safetensors"),
@@ -110,6 +111,8 @@ def setUpModule():
     cloud_env = dict(
         env, IMAGE_MODE="huggingface", STORYFORGE_ENV_FILE=str(TMP / "cloud.env"),
         TTS_MODE="elevenlabs", ELEVENLABS_URL=HF, ELEVENLABS_TIMEOUT_SECONDS="2",
+        WHISPER_SERVER=str(ROOT / "tests" / "fake_whisper_server"), WHISPER_MODEL=str(ROOT / "tests" / "fake_sd_cli"),
+        WHISPER_PORT="18094", FAKE_WHISPER_FAIL_FILE=str(TMP / "whisper_should_fail"),
         HF_URL=HF, HF_TIMEOUT_SECONDS="5", HF_FALLBACK_LOCAL="1", PORT=str(CLOUD_PORT),
         IMAGE_DIR=str(TMP / "cloud_images"), DATA_DIR=str(TMP / "cloud_data"), LOG_DIR=str(TMP / "cloud_logs"),
     )
@@ -894,7 +897,7 @@ class Flow(unittest.TestCase):
                               {"kind": "custom", "action": "", "after": 0})[0], 422)
         self.assertEqual(call("POST", f"{BASE}/api/stories/{story_id}/continue",
                               {"kind": "explode", "action": "x", "after": 0})[0], 422)
-        self.assertEqual(call("POST", f"{BASE}/api/transcribe", raw=b"RIFF")[0], 404)  # whisper not installed here
+        self.assertEqual(call("POST", f"{BASE}/api/transcribe", raw=b"RIFF")[0], 404)  # replaced by /api/listen
 
     def test_11_story_is_saved_to_disk(self):
         story_id = new_story()
@@ -1391,6 +1394,67 @@ def all_logs() -> str:
     """The test app's log, rotated files included (a full run writes more than one file's worth)."""
     files = sorted((TMP / "logs").glob("storyforge.log*"), key=lambda p: p.stat().st_mtime)
     return "".join(p.read_text(errors="replace") for p in files)
+
+
+def speech_wav(seconds: float = 1.0, rate: int = 44100) -> bytes:
+    """A short tone at 44.1 kHz stereo: the server must turn it into 16 kHz mono for whisper."""
+    import io, math, wave
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate)
+        frames = b"".join(int(8000 * math.sin(i / 20)).to_bytes(2, "little", signed=True) * 2
+                          for i in range(int(rate * seconds)))
+        w.writeframes(frames)
+    return out.getvalue()
+
+
+def listen_call(base: str, audio: bytes, content_type: str = "audio/wav"):
+    request = urllib.request.Request(f"{base}/api/listen", data=audio, method="POST",
+                                     headers={"Content-Type": content_type})
+    try:
+        with urllib.request.urlopen(request, timeout=40) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
+
+
+class VoiceInput(unittest.TestCase):
+    """Tap-to-talk: the recording goes to /api/listen, ffmpeg makes it 16 kHz mono WAV, whisper.cpp
+    (kept warm) writes it down, Hugging Face's Whisper if whisper fails; else "Type your idea instead"."""
+
+    def test_1_whisper_writes_down_what_was_said(self):
+        if not shutil.which("ffmpeg") and not Path("/home/akw/.local/bin/ffmpeg").exists():
+            self.skipTest("ffmpeg is not installed here")
+        wait_for(lambda: call("GET", f"{CLOUD}/api/health")[1]["voice_input"]["whisper"] == "ready", timeout=30)
+        self.assertTrue(call("GET", f"{CLOUD}/api/config")[1]["listen"])
+        status, body = listen_call(CLOUD, speech_wav())
+        self.assertEqual((status, body), (200, {"transcript": "A purple dragon who loves cake.", "engine": "whisper"}))
+        self.assertIn("voice input  engine=whisper  audio=1.0s", (TMP / "cloud_logs" / "storyforge.log").read_text())
+
+    def test_2_hugging_face_takes_over_when_whisper_fails(self):
+        (TMP / "whisper_should_fail").write_text("x")
+        try:
+            status, body = listen_call(CLOUD, speech_wav())
+        finally:
+            (TMP / "whisper_should_fail").unlink()
+        self.assertEqual((status, body), (200, {"transcript": "A friendly frog with a tiny hat.", "engine": "huggingface"}))
+        self.assertEqual(call("GET", f"{HF}/state")[1]["asr_path"], "/hf-inference/models/openai/whisper-large-v3-turbo")
+
+    def test_3_neither_says_type_it_instead(self):
+        status, body = listen_call(BASE, speech_wav())  # no whisper and no Hugging Face key here
+        self.assertEqual((status, body["message"]), (503, "Type your idea instead."))
+        self.assertFalse(call("GET", f"{BASE}/api/config")[1]["listen"])
+        self.assertEqual(listen_call(BASE, b"tiny")[0], 422)                                  # empty
+        self.assertEqual(listen_call(BASE, speech_wav(), "application/json")[0], 422)        # not audio
+
+    def test_4_both_pages_use_tap_to_talk(self):
+        for path in ("/", "/draw"):
+            self.assertIn(b"/static/listen.js", call("GET", f"{BASE}{path}")[1])
+        script = (ROOT / "static" / "listen.js").read_text()
+        self.assertIn("MediaRecorder", script)
+        self.assertIn("8000", script)  # stops by itself after 8 s
+        for name in ("app.js", "draw.js"):
+            self.assertNotIn("SpeechRecognition", (ROOT / "static" / name).read_text())
 
 
 class StoryPlot(unittest.TestCase):

@@ -199,9 +199,22 @@ wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/me
 Restart StoryForge; `/api/health` should then show `"narration": "piper"`. If Piper ever fails,
 the browser voice takes over automatically.
 
-**Offline voice input (whisper.cpp).** Only needed for browsers without speech recognition or
-without internet. Build whisper.cpp in `/home/akw/jetson-ai/whisper.cpp`, download `ggml-base.en.bin`
-into its `models` folder, and restart. `/api/health` then shows `"offline_voice_input": true`.
+**Voice input (tap the microphone).** The browser records and the Jetson writes down what was
+said, which goes into the text box to check before sending. It needs a secure page (https, e.g. the
+ngrok address, or localhost); on plain http the microphone is hidden. On the Jetson: ffmpeg (a static
+build in `~/.local/bin/ffmpeg` is fine) and whisper.cpp built with CUDA in `/home/akw/jetson-ai/whisper.cpp`
+with `models/ggml-base.en.bin`:
+
+```bash
+cd /home/akw/jetson-ai/whisper.cpp
+cmake -B build -DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES=87 -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2 --target whisper-server
+bash ./models/download-ggml-model.sh base.en
+```
+
+StoryForge starts `whisper-server` itself (model loaded once, kept warm) and `/api/health` shows
+`"voice_input": {"whisper": "ready"}`. Without it, Hugging Face's Whisper is used with `HF_TOKEN`;
+without either, the page says "Type your idea instead."
 
 **Your own cover picture.** Save an image as `static/art/landing.jpg` (or `.png`/`.webp`). It
 replaces the drawn book on the first screen. Nothing is generated when the site opens.
@@ -267,7 +280,9 @@ storyforge/config.py      reads settings.env
 storyforge/llm.py         prompts, streaming from Qwen, validation of its replies
 storyforge/store.py       story sessions and saving to disk
 storyforge/images.py      picture queue around sd-cli
-storyforge/speech.py      narration (ElevenLabs or Piper) and whisper voice input (all optional)
+storyforge/speech.py      narration (ElevenLabs or Piper; both optional)
+storyforge/listen.py      voice input: ffmpeg, whisper.cpp's server (kept warm), Hugging Face fallback
+static/listen.js          tap-to-talk recording (MediaRecorder), shared by the cover, the book and /draw
 storyforge/elevenlabs.py  ElevenLabs text-to-speech client
 storyforge/sysinfo.py     memory readings, logs and timings
 storyforge/tls_proxy.py   the https address for the microphone

@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from storyforge import hf_images, llm, speech, tls_proxy, vision
+from storyforge import hf_images, listen, llm, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
 from storyforge.images import (ImageWorker, cut_out_hero, hero_prompt, hero_words, preset_backgrounds,
@@ -64,12 +64,14 @@ async def lifespan(_app: FastAPI):
     store.cleanup_old()
     await worker.start()
     https_server = await tls_proxy.start_https_proxy()
+    listen.whisper.start()  # voice input: the model loads in the background and stays warm
     ok, reason = worker.availability()
     mem = memory_mb()
     log.info(
         "StoryForge started  port=%d  pictures=%s  narration=%s  offline voice input=%s  free memory=%d of %d MB",
         settings.port, worker.describe_mode() if ok else reason, speech.tts_mode(),
-        "yes" if speech.stt_available() else "no", mem["available"], mem["total"],
+        "whisper" if listen.whisper.installed() else "hugging face" if listen.available() else "no",
+        mem["available"], mem["total"],
     )
     if mem["total"] and not mem["swap_total"]:
         log.info("note: no swap space is configured; see the README section on memory")
@@ -83,6 +85,7 @@ async def lifespan(_app: FastAPI):
         _stop_defining()
         define_state["task"].cancel()
         await worker.stop()
+        await listen.whisper.stop()
         if https_server is not None:
             https_server.close()
         for story in store.stories.values():
@@ -921,19 +924,22 @@ async def abandon_story(story_id: str):
     return _no_store({"ok": True})
 
 
-@app.post("/api/transcribe")
-async def transcribe(request: Request):
-    """Offline voice input: the browser sends a short WAV recording, whisper.cpp returns text."""
-    if not speech.stt_available():
-        raise HTTPException(404, "Offline voice input is not installed.")
+@app.post("/api/listen")
+async def listen_to_voice(request: Request):
+    """Voice input: the browser's recording (webm, mp4, wav...) in, {transcript} out. whisper.cpp on
+    the Jetson, or Hugging Face's Whisper when that is not there; the words go into the text box for
+    the child to check before anything is sent."""
     body = await request.body()
-    if len(body) < 2000 or len(body) > 6_000_000 or body[:4] != b"RIFF" or body[8:12] != b"WAVE":
-        raise HTTPException(422, "The recording was empty or too long. Hold the microphone and try again.")
+    if len(body) < 1000 or len(body) > 8_000_000:
+        raise HTTPException(422, "The recording was empty or too long. Tap the microphone and try again.")
+    content_type = (request.headers.get("content-type") or "audio/webm").split(";")[0].strip()
+    if not content_type.startswith("audio/") and content_type != "application/octet-stream":
+        raise HTTPException(422, "That was not a recording. Tap the microphone and try again.")
     try:
-        text = await speech.transcribe(body)
-    except Exception:
-        raise HTTPException(500, "The recording could not be understood. Try again, or type instead.")
-    return _no_store({"text": text[: settings.max_premise_chars]})
+        text, engine = await listen.listen(body, content_type)
+    except listen.ListenFailed:
+        raise HTTPException(503, "Type your idea instead.")
+    return _no_store({"transcript": text[: settings.max_premise_chars], "engine": engine})
 
 
 @app.get("/api/config")
@@ -946,7 +952,7 @@ async def get_config():
     )
     return _no_store({
         "tts": speech.tts_mode(),
-        "server_stt": speech.stt_available(),
+        "listen": listen.available(),
         "images": images_ok,
         "images_reason": None if images_ok else IMAGE_MESSAGES.get(images_reason, images_reason),
         "landing_art": art,
@@ -971,7 +977,7 @@ async def health():
             "options_checked_against_help": worker.help_checked,
         },
         "narration": speech.tts_mode(),
-        "offline_voice_input": speech.stt_available(),
+        "voice_input": {"whisper": listen.whisper.state, "fallback": "huggingface" if settings.hf_token else None},
         "https_for_microphone": tls_proxy.https_ready(),
         "memory_mb": memory_mb(),
     })
