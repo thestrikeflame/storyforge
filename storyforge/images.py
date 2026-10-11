@@ -186,6 +186,64 @@ def crop_edges(data: bytes, width: int, height: int) -> tuple[bytes, str]:
     return out.getvalue(), "jpg"
 
 
+# A hero for a story nobody drew: painted by the cloud model as a child's drawing on white, then cut out.
+HERO_PROMPT = ("a child's crayon drawing of {kind}, simple shapes, thick outlines, plain white background, "
+               "full body, centered")
+
+
+def hero_prompt(kind: str) -> str:
+    kind = " ".join(kind.split()) or "friendly little creature"
+    if not re.match(r"(?i)(a|an|the)\s", kind):
+        kind = f"{'an' if kind[0].lower() in 'aeiou' else 'a'} {kind}"
+    return HERO_PROMPT.format(kind=kind)
+
+
+def cut_out_hero(data: bytes, max_side: int = 768) -> bytes:
+    """The hero from a drawing on white: the white paper connected to the picture's edges becomes
+    transparent (white inside the hero, like its eyes, stays), then it is cropped to the hero and
+    saved as a PNG of at most `max_side` pixels. Raises ValueError when there is no plain background
+    or no hero on it."""
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter, UnidentifiedImageError
+    try:
+        with Image.open(io.BytesIO(data)) as picture:
+            picture.load()
+            rgb = picture.convert("RGB")
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"could not read the picture: {exc}") from None
+    w, h = rgb.size
+    r, g, b = rgb.split()
+    paper = ImageChops.darker(ImageChops.darker(r, g), b).point(lambda v: 255 if v >= 222 else 0)
+    # Flood the paper from every edge on a smaller copy (fast), then scale the result back up.
+    scale = min(1.0, 256 / max(w, h))
+    small = paper.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.NEAREST)
+    sw, sh = small.size
+    for x, y in [(x, 0) for x in range(sw)] + [(x, sh - 1) for x in range(sw)] + \
+                [(0, y) for y in range(sh)] + [(sw - 1, y) for y in range(sh)]:
+        if small.getpixel((x, y)) == 255:
+            ImageDraw.floodfill(small, (x, y), 128, thresh=0)
+    outside = small.point(lambda v: 255 if v == 128 else 0).resize((w, h), Image.BILINEAR).point(lambda v: 255 if v >= 128 else 0)
+    background = ImageChops.multiply(outside, paper)
+    alpha = ImageChops.invert(background).filter(ImageFilter.GaussianBlur(0.7))
+    solid = alpha.point(lambda v: 255 if v > 40 else 0)
+    box = solid.getbbox()
+    if not box or ImageChops.invert(outside).getbbox() is None:
+        raise ValueError("no plain background around the hero")
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    if bw * bh < 0.02 * w * h:
+        raise ValueError("no hero on the picture")
+    if bw > 0.98 * w and bh > 0.98 * h:
+        raise ValueError("no plain background around the hero")
+    hero = rgb.convert("RGBA")
+    hero.putalpha(alpha)
+    pad = round(max(bw, bh) * 0.04) + 2
+    hero = hero.crop((max(0, box[0] - pad), max(0, box[1] - pad), min(w, box[2] + pad), min(h, box[3] + pad)))
+    if max(hero.size) > max_side:
+        hero.thumbnail((max_side, max_side), Image.LANCZOS)
+    out = io.BytesIO()
+    hero.save(out, "PNG", optimize=True)
+    return out.getvalue()
+
+
 def preset_backgrounds() -> list[Path]:
     """The ready-made backgrounds used when no picture can be painted."""
     return sorted((settings.static_dir / "art").glob("preset-*.jpg"))

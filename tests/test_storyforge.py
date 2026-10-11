@@ -554,6 +554,20 @@ class Parsing(unittest.TestCase):
         self.assertIn("together they find a clue", llm.page_beat(pre, 2, final=False))
         self.assertIn("solve it together", llm.page_beat(pre, 3, final=False))
 
+    def test_a_painted_hero_is_cut_out_of_its_white_paper(self):
+        from storyforge.images import cut_out_hero, hero_prompt
+        from tests.fake_hf import drawing_png, tiny_png
+        from PIL import Image
+        import io
+        hero = Image.open(io.BytesIO(cut_out_hero(drawing_png(96))))
+        self.assertEqual(hero.mode, "RGBA")
+        self.assertEqual(hero.getpixel((0, 0))[3], 0)
+        self.assertEqual(hero.getpixel((hero.width // 2, hero.height // 4))[3], 255)  # enclosed white stays
+        with self.assertRaises(ValueError):
+            cut_out_hero(tiny_png())  # no white paper around it: no hero rather than a rectangle
+        self.assertEqual(hero_prompt("owl"), "a child's crayon drawing of an owl, simple shapes, thick outlines, "
+                                             "plain white background, full body, centered")
+
     def test_gentle_and_length_checks_on_a_page(self):
         from storyforge import llm
         page = ("Mira woke up early. The dragons started to fight over a sword. She flew to the river.\n\n"
@@ -1039,11 +1053,8 @@ class CloudBackgrounds(unittest.TestCase):
         import io
         self.assertEqual(Image.open(io.BytesIO(jpg)).size, (512, 512))
         self.assertEqual(self.sd_rows(story_id), [])  # nothing painted on the Jetson
-        # the hero layer: the placeholder until /draw exists
-        status, story = call("GET", f"{CLOUD}/api/stories/{story_id}")
-        status, hero = call("GET", CLOUD + story["hero_url"])
-        self.assertEqual((status, hero[:8]), (200, b"\x89PNG\r\n\x1a\n"))
-        self.assertEqual(hero, (ROOT / "static" / "art" / "hero-placeholder.png").read_bytes())
+        # nobody drew this hero: the cloud painted one (see test_5); never a stand-in picture
+        self.assertFalse((ROOT / "static" / "art" / "hero-placeholder.png").exists())
 
     def test_2_slow_cloud_gives_up_and_paints_locally(self):
         hf_mode("slow")
@@ -1075,6 +1086,41 @@ class CloudBackgrounds(unittest.TestCase):
         self.assertIn("bakery kitchen", image["alt"])
         self.assertGreater(call("GET", f"{HF}/state")[1]["requests"], before)
         self.assertEqual(len(self.sd_rows(story_id)), 1)  # the cloud painted it this time
+
+    def test_5_a_story_from_an_idea_gets_a_painted_hero(self):
+        call("POST", f"{HF}/control", {"hero": "normal"})
+        before = call("GET", f"{HF}/state")[1]["hero_requests"]
+        story_id = new_story(base=CLOUD)
+        story = wait_for(lambda: (s := call("GET", f"{CLOUD}/api/stories/{story_id}")[1]) and s["hero_url"] and s)
+        state = call("GET", f"{HF}/state")[1]
+        self.assertEqual(state["hero_requests"], before + 1)
+        self.assertEqual(state["last_hero_prompt"], "a child's crayon drawing of a baby dragon, simple shapes, thick "
+                                                    "outlines, plain white background, full body, centered")
+        status, png = call("GET", CLOUD + story["hero_url"])
+        from PIL import Image
+        import io
+        hero = Image.open(io.BytesIO(png))
+        self.assertEqual((status, hero.mode), (200, "RGBA"))
+        self.assertEqual(hero.getpixel((0, 0))[3], 0)                     # the white paper is gone
+        self.assertEqual(hero.getpixel((hero.width // 2, hero.height // 4))[3], 255)  # the white face inside stays
+        saved = json.loads((TMP / "cloud_data" / "sessions" / f"{story_id}.json").read_text())
+        self.assertEqual((saved["hero_source"], saved["hero_status"]), ("painted", "ready"))
+        self.assertFalse(segment(story_id, 0, CLOUD)["hero_pending"])
+        self.assertIn(f"hero picture ready  story={story_id}", (TMP / "cloud_logs" / "storyforge.log").read_text())
+
+    def test_6_no_painted_hero_means_no_hero_layer(self):
+        call("POST", f"{HF}/control", {"hero": "error500"})
+        story_id = new_story(base=CLOUD)
+        wait_ready(story_id, 0, CLOUD)
+        wait_for(lambda: not segment(story_id, 0, CLOUD)["hero_pending"])
+        self.assertIsNone(call("GET", f"{CLOUD}/api/stories/{story_id}")[1]["hero_url"])
+        self.assertEqual(call("GET", f"{CLOUD}/api/stories/{story_id}/hero")[0], 404)
+        call("POST", f"{HF}/control", {"hero": "normal"})
+        # without the cloud (local pictures) there is no painted hero either: the background only
+        local = new_story()
+        wait_ready(local, 0)
+        self.assertIsNone(call("GET", f"{BASE}/api/stories/{local}")[1]["hero_url"])
+        self.assertEqual(call("GET", f"{BASE}/api/stories/{local}/hero")[0], 404)
 
     def test_4_key_is_loaded_from_env_file_and_never_shown(self):
         status, health = call("GET", f"{CLOUD}/api/health")

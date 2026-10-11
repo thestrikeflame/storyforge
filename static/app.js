@@ -677,7 +677,8 @@
   const imageSettled = (page) => ["completed", "failed", "skipped", "none"].includes(page.image.status);
   const needsWatching = (page) =>
     page.status === "writing" || (page.status === "ready" && ["queued", "generating"].includes(page.image.status))
-    || (page.status === "ready" && page.words_pending); // tap-a-word definitions are still coming
+    || (page.status === "ready" && page.words_pending) // tap-a-word definitions are still coming
+    || page.hero_pending; // the story's hero is still being painted
 
   function renderHeader() {
     const story = state.story;
@@ -1004,11 +1005,19 @@
         if (!state.story || state.story.id !== storyId || state.view !== index) return;
         img.src = image.url;
         img.alt = image.alt ? `Illustration: your hero in ${image.alt}` : "Illustration for this page";
-        // The background is scenery only; the same hero stands in every scene.
-        if (hero.getAttribute("src") !== state.story.heroUrl) hero.src = state.story.heroUrl;
+        // The background is scenery only; the same hero stands in every scene. No hero (none drawn and
+        // none painted): the background alone, never a stand-in.
+        const heroUrl = state.story.heroUrl;
+        figure.querySelector(".hero-stage").hidden = !heroUrl;
+        $("hero-fx").hidden = !heroUrl;
+        if (heroUrl && hero.getAttribute("src") !== heroUrl) hero.src = heroUrl;
+        if (!heroUrl) hero.removeAttribute("src");
         figure.dataset.state = "completed";
         shownProps = (page.props || []).map((p) => p.emoji).join("");
-        if (heroAnimator) heroAnimator.set(page.hero_action || "standing", page.props || []);
+        if (heroAnimator) {
+          if (heroUrl) heroAnimator.set(page.hero_action || "standing", page.props || []);
+          else heroAnimator.stop();
+        }
       };
       loader.onerror = () => {
         page.pictureBroken = true;
@@ -1138,7 +1147,7 @@
       title: data.title,
       premise: data.premise,
       ended: data.ended,
-      heroUrl: data.hero_url || "/static/art/hero-placeholder.png",
+      heroUrl: data.hero_url || null, // null: no hero layer, the background only
       readingLevel: data.reading_level || "early",
       pages: data.segments.map((seg, i) => Object.assign({}, previous[i] ? { pictureBroken: previous[i].pictureBroken } : {}, seg)),
     };
@@ -1183,6 +1192,7 @@
     story.pages[update.index] = page;
     if (update.title) story.title = update.title;
     if (update.ended) story.ended = true;
+    if ("hero_url" in update) story.heroUrl = update.hero_url || null; // a painted hero can arrive later
     if (update.index !== state.view) return;
 
     renderHeader();
