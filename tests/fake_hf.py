@@ -94,7 +94,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def speech(self, body: dict):
         STATE["tts_requests"] += 1
-        STATE["tts_last"] = {"path": self.path, "text": body.get("text", ""), "model": body.get("model_id", "")}
+        STATE["tts_last"] = {"path": self.path, "text": body.get("text", ""), "model": body.get("model_id", ""),
+                             "speed": (body.get("voice_settings") or {}).get("speed", 1.0)}
+        STATE.setdefault("tts_speeds", {})[body.get("text", "")] = STATE["tts_last"]["speed"]
         STATE["tts_texts"].append(body.get("text", ""))
         if self.headers.get("xi-api-key") != "test-eleven":
             return self._json(401, {"detail": {"status": "invalid_api_key", "message": "Invalid API key"}})

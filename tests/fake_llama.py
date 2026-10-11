@@ -14,6 +14,10 @@ POST /control {"ignore_choice": n} makes the next n pages leave out the reader's
 POST /control {"short_pages": n, "short_words": k} makes the next n pages only k words long.
 POST /control {"cut_off_pages": n} cuts the next n replies off a few words into the page text,
 with finish_reason "length", as if the token limit was hit.
+Tap-a-word definition requests (system prompt about learning new words) are answered separately and never
+change the page counters above: the three longest words on the page, plus a word that is not on
+the page and a name, which StoryForge must leave out.
+POST /control {"define_delay": seconds per piece, "define_mode": "normal" | "garbage"}.
 """
 import json
 import sys
@@ -21,7 +25,20 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATE = {"mode": "normal", "delay": 0.01, "requests": 0, "last_user": "", "last_format": None,
-         "ignore_choice": 0, "last_schema": None, "short_pages": 0, "short_words": 8, "cut_off_pages": 0}
+         "ignore_choice": 0, "last_schema": None, "short_pages": 0, "short_words": 8, "cut_off_pages": 0,
+         "last_system": "", "define_requests": 0, "define_cancelled": 0, "define_delay": 0.002,
+         "define_mode": "normal", "last_define_user": ""}
+
+
+def definitions_reply(user_text: str) -> dict:
+    import re
+    page = user_text.split('"""')[1] if user_text.count('"""') >= 2 else user_text
+    words = sorted({w for w in re.findall(r"[A-Za-z]+", page) if w.islower()}, key=lambda w: (-len(w), w))[:3]
+    items = [{"word": w, "definition": f"a {w} is a thing in the story. More words here."} for w in words]
+    items.append({"word": "zeppelin", "definition": "a big airship"})  # not on the page
+    if "Mira" in page:
+        items.insert(0, {"word": "Mira", "definition": "the little dragon"})  # a name
+    return {"words": items[:4]}
 
 PAGES = [
     "Mira was a small purple dragon, no bigger than a watering can, and she lived at the edge of the Whispering Wood. "
@@ -145,8 +162,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             return self._json(404, {})
 
+        # Recognised by the prompt, not the schema: after "no_schema" StoryForge sends json_object.
+        if "learn new words" in body["messages"][0]["content"]:
+            return self.definitions(body)
         STATE["requests"] += 1
         STATE["last_user"] = body["messages"][-1]["content"]
+        STATE["last_system"] = body["messages"][0]["content"]
         fmt = (body.get("response_format") or {}).get("type")
         schema = ((body.get("response_format") or {}).get("json_schema") or {}).get("schema") or {}
         STATE["last_schema"] = schema
@@ -193,6 +214,33 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             STATE["cancelled"] = STATE.get("cancelled", 0) + 1
         self.close_connection = True
+
+
+def _definitions(handler, body):
+    STATE["define_requests"] += 1
+    STATE["last_define_user"] = body["messages"][-1]["content"]
+    if STATE["define_mode"] == "garbage":
+        text = "Sorry, I can't help with words today."
+    else:
+        text = json.dumps(definitions_reply(STATE["last_define_user"]))
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    try:
+        for i in range(0, len(text), 6):
+            chunk = {"choices": [{"delta": {"content": text[i : i + 6]}}]}
+            handler.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
+            handler.wfile.flush()
+            time.sleep(float(STATE["define_delay"]))
+        handler.wfile.write(b'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\ndata: [DONE]\n\n')
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        STATE["define_cancelled"] += 1
+    handler.close_connection = True
+
+
+Handler.definitions = _definitions
 
 
 if __name__ == "__main__":

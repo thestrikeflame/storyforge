@@ -32,14 +32,49 @@ class WriterFailed(Exception):
 
 SYSTEM_PROMPT = (
     "You are StoryForge, a storyteller who writes an illustrated story one page at a time "
-    "together with a reader. Unless the reader's idea clearly asks for an older audience, "
-    "write for children aged 5 to 10: warm, vivid, simple sentences, never frightening or violent. "
+    "together with a reader. {reader} Write warmly, never frightening or violent. "
     "Keep it gentle: nobody is hurt, attacked or fought. "
     "Each page has at least {min_words} and at most {max_words} words, in one or two short "
     "paragraphs, told in the past tense. Keep names, looks and places consistent with what came before. "
     "Never wrap up the whole story unless you are told it is the last page. "
     "Reply with one JSON object only, no other text."
 )
+
+@dataclass(frozen=True)
+class ReadingLevel:
+    key: str
+    label: str
+    min_words: int  # words per page
+    max_words: int
+    style: str  # how the pages are written (in the system prompt)
+    reader: str  # who the word definitions are for
+    extra_tokens: int = 0  # longer pages need a little more room
+
+
+READING_LEVELS = {
+    "pre": ReadingLevel(
+        "pre", "Pre-reader", 30, 45,
+        "The reader is a pre-reader (ages 3 to 5) who listens along: use very short, simple sentences "
+        "of about 4 to 8 words, everyday words a small child knows, and a little repetition.",
+        "a pre-reader aged 3 to 5"),
+    "early": ReadingLevel(
+        "early", "Early reader", 45, 60,
+        "The reader is an early reader (kindergarten to grade 2, ages 5 to 8): use short, simple "
+        "sentences and familiar words, with only a few new words that the story makes clear.",
+        "an early reader aged 5 to 8"),
+    "confident": ReadingLevel(
+        "confident", "Confident reader", 60, 80,
+        "The reader is a confident reader (grades 3 to 5, ages 8 to 11): use varied sentences and "
+        "rich, vivid, descriptive words.",
+        "a confident reader aged 8 to 11", extra_tokens=60),
+}
+DEFAULT_LEVEL = "early"
+
+
+def reading_level(story: dict) -> ReadingLevel:
+    """The story's reading level; Early reader for stories made before levels existed."""
+    return READING_LEVELS.get(story.get("reading_level") or "", READING_LEVELS[DEFAULT_LEVEL])
+
 
 # What the hero does on a page; the browser animates the hero layer for each (static/hero.js).
 # The first one is the default for anything off the list.
@@ -254,9 +289,8 @@ def hero_notes(description: str) -> tuple[str, list[str]]:
 def build_messages(story: dict, action: str | None, final: bool, event: str | None = None) -> list[dict]:
     """Build the chat messages for the next page. Sends a compact summary plus only the
     most recent page, never the whole history, so the 2048-token context is not exceeded."""
-    system = SYSTEM_PROMPT.format(
-        min_words=settings.segment_min_words, max_words=settings.segment_max_words
-    )
+    level = reading_level(story)
+    system = SYSTEM_PROMPT.format(reader=level.style, min_words=level.min_words, max_words=level.max_words)
     ready = [s for s in story["segments"] if s["status"] == "ready"]
     page_number = len(ready) + 1
 
@@ -287,7 +321,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             + _PLAN_KEYS
             + ('"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n' if hero else "") +
             '"segment": the text of page 1, written from the plan above: '
-            f'{settings.segment_min_words} to {settings.segment_max_words} words in one or two short paragraphs.\n'
+            f'{level.min_words} to {level.max_words} words in one or two short paragraphs.\n'
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
             '"world": the setting in at most 20 words.\n'
@@ -335,7 +369,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
                f'The "action" is what the hero does in this event.\n' if event else "")
             + _PLAN_KEYS +
             f'"segment": the text of page {page_number}, written from the plan above: '
-            f'{settings.segment_min_words} to {settings.segment_max_words} words in one or two short paragraphs.\n'
+            f'{level.min_words} to {level.max_words} words in one or two short paragraphs.\n'
             + _COMMON_KEYS + choices_key + _SUMMARY_KEY
             # Last, because a small model follows the last instruction best.
             + (f"\n\nThis page must show: {event}" if event else "")
@@ -392,8 +426,14 @@ class LLMStream:
     tokens: int | None = None
     tokens_per_second: float | None = None
     finish_reason: str | None = None  # "length" means the token limit cut the reply off
+    max_tokens: int | None = None  # LLM_MAX_TOKENS unless given
+    schema_name: str = "story_page"
     _conn: http.client.HTTPConnection | None = field(default=None, repr=False)
     _cancelled: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    @property
+    def was_cancelled(self) -> bool:
+        return self._cancelled.is_set()
 
     def cancel(self) -> None:
         """Stop generation. Closing the connection makes llama-server stop producing tokens."""
@@ -412,14 +452,14 @@ class LLMStream:
             "messages": self.messages,
             "temperature": self.temperature,
             "top_p": 0.9,
-            "max_tokens": settings.llm_max_tokens,
+            "max_tokens": self.max_tokens or settings.llm_max_tokens,
             "stream": True,
             "cache_prompt": True,
         }
         if style == "json_schema":
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": {"name": "story_page", "strict": True, "schema": self.schema},
+                "json_schema": {"name": self.schema_name, "strict": True, "schema": self.schema},
             }
         elif style == "json_object":
             body["response_format"] = {"type": "json_object"}
@@ -904,3 +944,85 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
         repaired=repaired,
         repeats_dropped=dropped,
     )
+
+
+# --------------------------------------------------------------------------
+# Tap-a-word definitions
+# --------------------------------------------------------------------------
+# Once a page is finished (and llama-server is idle), Qwen picks the 3-4 hardest words on it and
+# defines each in one sentence for the story's reading level. Only words that really are on the
+# page are kept; the browser underlines them.
+
+DEFINE_SYSTEM = "You help children learn new words. Reply with one JSON object only, no other text."
+DEFINE_MAX_TOKENS = 260
+
+
+def build_definition_messages(text: str, level: ReadingLevel) -> list[dict]:
+    # No example words or definitions: a small model copies examples.
+    user = (
+        f'Here is a page from a story for children:\n"""\n{text}\n"""\n\n'
+        f"The reader is {level.reader}. Pick the 3 or 4 words on this page that this reader is "
+        "least likely to know. Copy each word exactly as it is written on the page. Never pick a "
+        "name or a very easy word.\n"
+        f"For each word write a definition: one short sentence that {level.reader} understands, "
+        "saying what the word means here.\n"
+        'Use the JSON key "words": a list of objects with the keys "word" and "definition".'
+    )
+    return [{"role": "system", "content": DEFINE_SYSTEM}, {"role": "user", "content": user}]
+
+
+def definition_schema() -> dict:
+    item = {
+        "type": "object",
+        "properties": {"word": {"type": "string"}, "definition": {"type": "string"}},
+        "required": ["word", "definition"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {"words": {"type": "array", "items": item, "minItems": 3, "maxItems": 4}},
+        "required": ["words"],
+        "additionalProperties": False,
+    }
+
+
+def _word_pattern(word: str) -> re.Pattern:
+    return re.compile(r"(?<![\w'’-])" + re.escape(word) + r"(?![\w'’-])", re.I)
+
+
+def _starts_sentence(text: str, at: int) -> bool:
+    before = text[:at].rstrip(" \t\"'“‘(")
+    return not before or before[-1] in ".!?\n…"
+
+
+def parse_definitions(raw: str, text: str, names: frozenset[str] = frozenset()) -> list[dict]:
+    """The model's words that are really on the page, each as the page writes it, with a one-sentence
+    definition. Names (capitalised everywhere on the page, or one of `names`) and small words are
+    left out. Raises WriterFailed when the reply is not usable at all."""
+    data = _loads_lenient(raw)
+    items = data.get("words") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise WriterFailed("no word list in the reply")
+    found: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        word = clean_line(str(item.get("word") or ""), 40).strip(" .,!?;:\"'“”‘’()")
+        definition = clean_line(str(item.get("definition") or ""), 240)
+        if not word or not definition or len(word.split()) > 3 or len(word) < 3 or not re.search(r"[A-Za-z]", word):
+            continue
+        key = word.lower()
+        if key in seen or key in _SMALL_WORDS or key in names or definition.lower().strip(" .") == key:
+            continue
+        matches = list(_word_pattern(word).finditer(text))
+        if not matches:
+            continue  # not on the page (or a different form of the word)
+        if all(m.group(0)[0].isupper() for m in matches) and (
+                word[0].isupper() or any(not _starts_sentence(text, m.start()) for m in matches)):
+            continue  # a name: capitalised everywhere on the page
+        first = re.match(r"(.+?[.!?])(\s|$)", definition)
+        definition = first.group(1) if first else definition.rstrip(",;:") + "."
+        seen.add(key)
+        found.append({"word": matches[0].group(0), "definition": definition[0].upper() + definition[1:]})
+    return found[:4]

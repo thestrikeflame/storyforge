@@ -30,7 +30,8 @@ from storyforge import llm, speech, tls_proxy, vision
 from storyforge.config import settings
 from storyforge.images import MESSAGES as IMAGE_MESSAGES
 from storyforge.images import ImageWorker, hero_words, preset_backgrounds, worn_or_about_the_hero
-from storyforge.store import StoryStore, hero_path, new_segment, new_story, segment_view, story_view
+from storyforge.store import (StoryStore, hero_path, new_segment, new_story, segment_view, story_view,
+                              words_pending)
 from storyforge.sysinfo import log, memory_mb, setup_logging, timings
 
 ERRORS = {
@@ -46,13 +47,19 @@ llm_lock: asyncio.Lock  # one page is written at a time; created at startup
 active_streams: dict[str, llm.LLMStream] = {}
 write_tasks: dict[str, asyncio.Task] = {}
 MAX_WAITING_WRITES = 3
+# Tap-a-word definitions: pages waiting for them, made one at a time while Qwen is otherwise idle.
+define_queue: list[tuple[str, int]] = []
+define_wake: asyncio.Event  # created at startup
+define_state: dict = {"stream": None, "task": None}
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global llm_lock
+    global llm_lock, define_wake
     setup_logging()
     llm_lock = asyncio.Lock()
+    define_wake = asyncio.Event()
+    define_state["task"] = asyncio.create_task(_definer(), name="definer")
     store.cleanup_old()
     await worker.start()
     https_server = await tls_proxy.start_https_proxy()
@@ -72,6 +79,8 @@ async def lifespan(_app: FastAPI):
             stream.cancel()
         for task in list(write_tasks.values()):
             task.cancel()
+        _stop_defining()
+        define_state["task"].cancel()
         await worker.stop()
         if https_server is not None:
             https_server.close()
@@ -129,7 +138,7 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
     _choose_props(story, seg, cleaned)
     seg["text_complete"] = True
     seg["timings"]["text_seconds"] = round(time.monotonic() - started, 1)
-    narrator.prepare(story["id"], seg["index"], cleaned)
+    narrator.prepare(story["id"], seg["index"], cleaned, _voice_speed(story))
 
 
 def _choose_props(story: dict, seg: dict, text: str = "") -> None:
@@ -184,6 +193,8 @@ async def write_segment(story: dict, seg: dict) -> None:
     where = f"story={story['id']} page={seg['index'] + 1}"
     drafts: list[str] = []  # each try's text, so a page with some text is never thrown away
     problem = ""
+    level = llm.reading_level(story)
+    _stop_defining()  # definitions never hold up a page: they are made again later
     try:
         async with llm_lock:
             if story.get("abandoned"):
@@ -195,6 +206,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                     messages=llm.build_messages(story, seg["action"], final, event=event),
                     schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description")), event=event),
                     temperature=settings.llm_temperature if attempt == 1 else 0.5,
+                    max_tokens=settings.llm_max_tokens + level.extra_tokens,
                 )
                 active_streams[story["id"]] = stream
                 job = asyncio.create_task(asyncio.to_thread(stream.run))
@@ -275,7 +287,7 @@ async def write_segment(story: dict, seg: dict) -> None:
         seg["text"] = page.segment
         seg["text_complete"] = True
         seg["timings"]["text_seconds"] = round(time.monotonic() - started, 1)
-        narrator.prepare(story["id"], seg["index"], seg["text"])
+        narrator.prepare(story["id"], seg["index"], seg["text"], _voice_speed(story))
     seg["partial"] = ""
     seg["visual_prompt"] = page.visual_prompt
     if page.setting and not seg.get("setting"):
@@ -311,9 +323,9 @@ async def write_segment(story: dict, seg: dict) -> None:
     # One line per failed check, all starting "page check failed", to see how often each happens.
     if seg.get("choice_check") == "bridged":
         log.warning("page check failed  %s  check=choice  choice=%r  (bridge sentence added)", where, event)
-    if llm.word_count(seg["text"]) < settings.segment_min_words:
-        log.warning("page check failed  %s  check=length  words=%d of %d-%d  (kept)", where,
-                    llm.word_count(seg["text"]), settings.segment_min_words, settings.segment_max_words)
+    if llm.word_count(seg["text"]) < level.min_words:
+        log.warning("page check failed  %s  check=length  words=%d of %d-%d  level=%s  (kept)", where,
+                    llm.word_count(seg["text"]), level.min_words, level.max_words, level.key)
     if seg.get("repeats_dropped"):
         log.warning("page check failed  %s  check=repeat  sentences_dropped=%d", where, seg["repeats_dropped"])
     if event:
@@ -350,6 +362,104 @@ async def write_segment(story: dict, seg: dict) -> None:
     # unless the reader races ahead. (A cloud background usually started while writing.)
     worker.enqueue(story, seg)
     store.save(story)
+    _want_definitions(story)
+
+
+def _voice_speed(story: dict) -> float:
+    """Pre-readers hear the story a little more slowly."""
+    return 0.9 if llm.reading_level(story).key == "pre" else 1.0
+
+
+# --------------------------------------------------------------------------
+# Tap-a-word definitions
+# --------------------------------------------------------------------------
+
+def _want_definitions(story: dict) -> None:
+    """Queue every finished page of this story that has no definitions yet."""
+    for seg in story["segments"]:
+        key = (story["id"], seg["index"])
+        if words_pending(story, seg) and key not in define_queue:
+            define_queue.append(key)
+    if define_queue:
+        define_wake.set()
+
+
+def _stop_defining() -> None:
+    """A page is about to be written: stop the definitions being made (they are tried again later)."""
+    stream = define_state["stream"]
+    if stream is not None:
+        stream.cancel()
+
+
+def _qwen_busy() -> bool:
+    return llm_lock.locked() or _waiting_writes() > 0 or worker.painting_locally()
+
+
+async def _definer() -> None:
+    """Makes definitions one page at a time, only while no page is being written and no local
+    picture is being painted, so they never slow a page down."""
+    while True:
+        await define_wake.wait()
+        define_wake.clear()
+        while define_queue:
+            if _qwen_busy():
+                await asyncio.sleep(0.5)
+                continue
+            story_id, index = define_queue[0]
+            story = store.get(story_id)
+            seg = story["segments"][index] if story and index < len(story["segments"]) else None
+            if seg is None or not words_pending(story, seg):
+                define_queue.pop(0)
+                continue
+            try:
+                outcome = await _define_page(story, seg)
+            except Exception:  # never let one page stop the definer
+                log.exception("unexpected error while defining words  story=%s page=%d", story_id, index + 1)
+                outcome = "failed"
+            if outcome != "cancelled" and define_queue and define_queue[0] == (story_id, index):
+                define_queue.pop(0)
+                if words_pending(story, seg):
+                    define_queue.append((story_id, index))  # one more try, after the others
+
+
+async def _define_page(story: dict, seg: dict) -> str:
+    """Ask Qwen for this page's tricky words. Returns 'done', 'failed' or 'cancelled'."""
+    level = llm.reading_level(story)
+    where = f"story={story['id']} page={seg['index'] + 1}"
+    started = time.monotonic()
+    async with llm_lock:
+        stream = llm.LLMStream(
+            messages=llm.build_definition_messages(seg["text"], level), schema=llm.definition_schema(),
+            temperature=0.3, max_tokens=llm.DEFINE_MAX_TOKENS, schema_name="word_definitions",
+        )
+        define_state["stream"] = stream
+        try:
+            raw = await asyncio.to_thread(stream.run)
+        except (llm.WriterFailed, llm.WriterOffline) as exc:
+            if stream.was_cancelled:
+                log.info("definitions paused  %s  (a page is being written; trying again afterwards)", where)
+                return "cancelled"
+            seg["words_attempts"] = seg.get("words_attempts", 0) + 1
+            log.warning("definitions failed  %s  attempt=%d  (%s)", where, seg["words_attempts"], exc)
+            store.save(story)
+            return "failed"
+        finally:
+            define_state["stream"] = None
+    names = frozenset(w.lower().strip(".,!?'\"") for w in
+                      f"{story.get('hero_name') or ''} {story.get('hero_who') or ''}".split())
+    try:
+        words = llm.parse_definitions(raw, seg["text"], names)
+    except llm.WriterFailed as exc:
+        seg["words_attempts"] = seg.get("words_attempts", 0) + 1
+        log.warning("definitions failed  %s  attempt=%d  (%s)  reply began: %r", where,
+                    seg["words_attempts"], exc, raw[:160])
+        store.save(story)
+        return "failed"
+    seg["words"] = words
+    log.info("definitions ready  %s  level=%s  %.1fs  words=%s", where, level.key,
+             time.monotonic() - started, [w["word"] for w in words])
+    store.save(story)
+    return "done"
 
 
 def _title_from_premise(premise: str) -> str:
@@ -380,8 +490,12 @@ def _waiting_writes() -> int:
 # Requests
 # --------------------------------------------------------------------------
 
+ReadingLevelKey = Literal["pre", "early", "confident"]
+
+
 class NewStory(BaseModel):
     premise: str = Field(min_length=1, max_length=settings.max_premise_chars)
+    reading_level: ReadingLevelKey = "early"
 
 
 class DrawnHero(BaseModel):
@@ -391,6 +505,7 @@ class DrawnHero(BaseModel):
     preview_jpeg: str = Field(min_length=100, max_length=2_000_000)
     idea: str = Field(default="", max_length=settings.max_premise_chars)
     who: str = Field(default="", max_length=120)  # "Who is this?" on /draw, e.g. "my bunny Ricky"
+    reading_level: ReadingLevelKey = "early"
 
 
 def _decode_image(value: str, magic: bytes, limit: int) -> bytes:
@@ -442,11 +557,11 @@ async def create_story(body: NewStory):
         raise HTTPException(422, "Describe your story idea in a few words first.")
     if _waiting_writes() >= MAX_WAITING_WRITES:
         raise HTTPException(503, "The storyteller is busy with other stories. Try again in a moment.")
-    story = new_story(premise)
+    story = new_story(premise, body.reading_level)
     seg = new_segment(0, None, "opening")
     story["segments"].append(seg)
     store.add(story)
-    log.info("story started  story=%s  idea=%r", story["id"], premise[:80])
+    log.info("story started  story=%s  level=%s  idea=%r", story["id"], body.reading_level, premise[:80])
     _start_writing(story, seg)
     return _no_store(story_view(story, worker.eta_seconds()), 201)
 
@@ -467,7 +582,7 @@ async def create_drawn_story(body: DrawnHero):
     # (it is quoted in prompts), control characters dropped and the length capped.
     who = " ".join("".join(c for c in body.who.replace('"', "'") if c.isprintable()).split())[:80]
 
-    story = new_story(idea or "A story about the hero I drew")
+    story = new_story(idea or "A story about the hero I drew", body.reading_level)
     path = hero_path(story["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".part")
@@ -494,7 +609,8 @@ async def create_drawn_story(body: DrawnHero):
     seg = new_segment(0, None, "opening")
     story["segments"].append(seg)
     store.add(story)
-    log.info("story started from a drawing  story=%s  hero=%dx%d", story["id"], width, height)
+    log.info("story started from a drawing  story=%s  level=%s  hero=%dx%d", story["id"], body.reading_level,
+             width, height)
     _start_writing(story, seg)
     return _no_store({**story_view(story, worker.eta_seconds()), "hero_description": description}, 201)
 
@@ -507,6 +623,7 @@ async def draw_page():
 @app.get("/api/stories/{story_id}")
 async def get_story(story_id: str):
     story = _story_or_404(story_id)
+    _want_definitions(story)  # e.g. pages finished before a restart
     return _no_store(story_view(story, worker.eta_seconds()))
 
 
@@ -624,11 +741,26 @@ async def get_audio(story_id: str, index: int):
     seg = _segment_or_404(story, index)
     if not seg["text_complete"] or not seg["text"]:
         raise HTTPException(404, "This page has no narration yet.")
-    path = await narrator.get(story["id"], seg["index"], seg["text"])
+    path = await narrator.get(story["id"], seg["index"], seg["text"], _voice_speed(story))
     if path is None:
         raise HTTPException(404, "Narration is not available from the server.")
     media = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
     return FileResponse(path, media_type=media, headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/stories/{story_id}/segments/{index}/words/{number}/audio")
+async def get_word_audio(story_id: str, index: int, number: int):
+    """A tapped word and its definition, read aloud. Only the page's own defined words are ever
+    voiced; each is made once and kept."""
+    story = _story_or_404(story_id)
+    seg = _segment_or_404(story, index)
+    words = seg.get("words") or []
+    if not 0 <= number < len(words):
+        raise HTTPException(404, "That word has no definition.")
+    path = await narrator.get_word(words[number]["word"], words[number]["definition"], _voice_speed(story))
+    if path is None:
+        raise HTTPException(404, "This word cannot be read aloud from the server.")
+    return FileResponse(path, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/api/stories/{story_id}/abandon")

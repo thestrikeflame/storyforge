@@ -389,6 +389,10 @@ class ImageWorker:
             if key[0] == story_id:
                 task.cancel()
 
+    def painting_locally(self) -> bool:
+        """sd-cli is running on the Jetson's GPU right now."""
+        return self._current is not None
+
     def queue_length(self) -> int:
         return len(self._queue) + (1 if self._current else 0) + len(self._hf_tasks)
 

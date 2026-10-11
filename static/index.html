@@ -165,6 +165,12 @@
     <form class="premise-form" id="premise-form">
       <label class="visually-hidden" for="premise">Your story idea</label>
       <textarea id="premise" rows="2" placeholder="Or type it here. For example: a small purple dragon finds a mysterious door in an enchanted forest."></textarea>
+      <fieldset class="levels" id="levels">
+        <legend>Who is reading?</legend>
+        <label><input type="radio" name="reading-level" value="pre"><span>Pre-reader</span></label>
+        <label><input type="radio" name="reading-level" value="early" checked><span>Early reader <small>K-2</small></span></label>
+        <label><input type="radio" name="reading-level" value="confident"><span>Confident reader <small>3-5</small></span></label>
+      </fieldset>
       <div class="form-row">
         <button class="ghost" id="invite-back" type="button">Back</button>
         <button class="primary" id="premise-submit" type="submit">Begin the story</button>
@@ -267,6 +273,10 @@
 </main>
 
 <div class="toast" id="toast" role="alert" hidden></div>
+<!-- Tap-a-word: the definition of an underlined word (app.js "tap-a-word"). -->
+<div class="word-bubble" id="word-bubble" role="dialog" aria-label="What this word means" hidden>
+  <p><strong id="word-bubble-word"></strong> <span id="word-bubble-text"></span></p>
+</div>
 
 <script src="/static/hero.js" defer></script>
 <script src="/static/app.js" defer></script>

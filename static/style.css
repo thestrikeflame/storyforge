@@ -313,6 +313,22 @@ textarea::placeholder, input::placeholder { color: var(--mist-dim); opacity: 1; 
 textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none; box-shadow: 0 0 0 3px rgba(244, 199, 107, .25); }
 .form-row { display: flex; align-items: center; justify-content: center; gap: var(--s4); flex-wrap: wrap; }
 
+/* Reading level: three pills (radio buttons underneath). Also on /draw (draw.css). */
+.levels { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: var(--s2); }
+.levels legend { float: left; width: 100%; padding: 0; margin-bottom: var(--s1); text-align: center; color: var(--mist); font-size: .95rem; }
+.levels label { position: relative; }
+.levels input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.levels span {
+  display: inline-block; border: 1px solid rgba(214, 205, 236, .32); background: rgba(18, 16, 43, .35);
+  color: var(--mist); border-radius: 999px; padding: .45em 1.05em; font-size: .95rem;
+  transition: border-color .15s, color .15s, background-color .15s;
+}
+.levels small { font-size: .82em; color: var(--mist-dim); margin-left: .15em; }
+.levels label:hover span { border-color: var(--gold); }
+.levels input:checked + span { background: var(--gold); border-color: var(--gold); color: var(--ink); font-weight: 600; }
+.levels input:checked + span small { color: var(--ink-soft); }
+.levels input:focus-visible + span { outline: 3px solid var(--gold-bright); outline-offset: 2px; }
+
 /* ───────── the open book ───────── */
 
 .book-row {
@@ -676,6 +692,28 @@ textarea:focus, .own-idea input:focus { border-color: var(--gold); outline: none
   background: var(--ember); animation: blink 1s ease-in-out infinite alternate;
 }
 @keyframes blink { from { opacity: .25; } to { opacity: 1; } }
+
+/* Tap-a-word: words with a definition get a dotted underline; tapping one opens the bubble. */
+.words .word {
+  cursor: pointer; border-radius: 4px;
+  text-decoration: underline dotted #7a3f8f; text-decoration-thickness: 2px; text-underline-offset: .22em;
+  -webkit-tap-highlight-color: transparent;
+}
+.words .word:hover, .words .word[aria-expanded="true"] { background: rgba(244, 199, 107, .4); }
+.words .word:focus-visible { outline: 2px solid #7a3f8f; outline-offset: 2px; }
+.word-bubble {
+  position: fixed; z-index: 60; left: 16px; top: 16px;
+  width: max-content; max-width: min(22rem, calc(100vw - 32px));
+  background: var(--parchment); color: var(--ink);
+  border-radius: 14px; padding: .7em .95em;
+  box-shadow: 0 10px 30px rgba(10, 9, 32, .4), 0 0 0 1.5px rgba(44, 35, 64, .2);
+  font-family: var(--story); font-size: 1.05rem; line-height: 1.45;
+  animation: bubble-in .18s var(--ease);
+}
+.word-bubble p { margin: 0; }
+.word-bubble strong { font-family: var(--display); font-weight: 620; color: #7a3f8f; }
+@keyframes bubble-in { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .word-bubble { animation: none; } }
 
 .words-problem { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: var(--s4); font-size: 1.1rem; }
 .words-problem p { margin: 0; text-wrap: balance; }

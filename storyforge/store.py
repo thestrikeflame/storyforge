@@ -52,16 +52,22 @@ def new_segment(index: int, action: str | None, kind: str) -> dict:
         "error": None,
         "image": new_image_state(),
         "timings": {},
+        "words": None,  # tap-a-word definitions, [{"word", "definition"}]; None until Qwen has made them
+        "words_attempts": 0,
     }
 
 
-def new_story(premise: str) -> dict:
+WORDS_MAX_ATTEMPTS = 2
+
+
+def new_story(premise: str, reading_level: str = "early") -> dict:
     now = time.time()
     return {
         "id": secrets.token_hex(8),
         "created": now,
         "updated": now,
         "premise": premise,
+        "reading_level": reading_level,  # pre | early | confident (llm.READING_LEVELS)
         "title": "",
         "character_look": "",
         "world": "",
@@ -172,6 +178,9 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
         "final": bool(seg.get("final")),
         "hero_action": seg.get("hero_action") or "",
         "props": seg.get("props") or [],
+        "words": seg.get("words") or [],
+        # Definitions are still to come: the browser keeps asking for this page until they arrive.
+        "words_pending": words_pending(story, seg),
         "error": seg.get("error"),
         "image": {
             "status": image["status"],
@@ -188,11 +197,17 @@ def segment_view(story: dict, seg: dict, image_eta: float | None = None) -> dict
     }
 
 
+def words_pending(story: dict, seg: dict) -> bool:
+    return (seg["status"] == "ready" and bool(seg.get("text")) and seg.get("words") is None
+            and seg.get("words_attempts", 0) < WORDS_MAX_ATTEMPTS and not story.get("abandoned"))
+
+
 def story_view(story: dict, image_eta: float | None = None) -> dict:
     return {
         "id": story["id"],
         "title": story.get("title") or "",
         "premise": story["premise"],
+        "reading_level": story.get("reading_level") or "early",
         "ended": bool(story.get("ended")),
         # Always answers: the child's drawing, or the placeholder hero until one is drawn.
         "hero_url": f"/api/stories/{story['id']}/hero?v={story.get('hero') or 0}",

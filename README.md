@@ -148,6 +148,14 @@ Other things already done for speed and stability:
 * One picture at a time, with a queue. Free memory is checked first (`SD_MIN_FREE_MB`): if there is
   too little, the picture is skipped with a message rather than risking a crash.
 * Pictures for a story you have left are cancelled.
+* **Reading level** (on the cover and on the drawing page): Pre-reader (30-45 words a page, very short
+  sentences, narration a little slower), Early reader K-2 (45-60, the default) or Confident reader 3-5
+  (60-80, richer words). It is saved with the story.
+* **Tap a word:** once a page is finished, Qwen picks 3-4 tricky words on it and explains each in one
+  sentence for the reading level. Those words get a dotted underline; tapping one shows the
+  meaning and reads it aloud (with ElevenLabs, made once per word, or the browser's voice). This only
+  runs while Qwen has nothing else to do: a new page always goes first, and the words simply
+  appear a little later.
 
 Going further (not done, because each needs a download or a measured decision on your hardware):
 

@@ -125,6 +125,27 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--ink); outline-o
 .done:active:not(:disabled), .primary:active { transform: translateY(1px); }
 .done:disabled { background: #e8e0cf; color: rgba(44, 35, 64, .45); box-shadow: 0 0 0 2px rgba(44, 35, 64, .2); cursor: default; }
 
+/* Reading level: three pills (radio buttons underneath), on a second row of the top bar. */
+.bar-top { flex-wrap: wrap; row-gap: 8px; }
+.levels {
+  flex: 1 1 100%; border: 0; margin: 0; padding: 0; min-width: 0;
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px 8px;
+  pointer-events: none;
+}
+.levels > * { pointer-events: auto; }
+.levels legend { float: left; padding: 0 4px; font-size: clamp(.9rem, 2.6vw, 1.05rem); color: var(--ink-soft); }
+.levels label { position: relative; }
+.levels input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.levels span {
+  display: inline-block; border-radius: 999px; padding: .35em .95em;
+  background: rgba(255, 250, 240, .94); color: var(--ink);
+  box-shadow: 0 0 0 2px rgba(44, 35, 64, .25);
+  font-size: clamp(.9rem, 2.6vw, 1.05rem);
+}
+.levels small { font-size: .82em; color: var(--ink-soft); margin-left: .15em; }
+.levels input:checked + span { background: var(--gold); box-shadow: 0 0 0 2px var(--ink); font-weight: 640; }
+.levels input:focus-visible + span { outline: 3px solid var(--ink); outline-offset: 3px; }
+
 .colors {
   display: flex; gap: clamp(8px, 2vw, 14px);
   padding: 8px; border-radius: 999px;

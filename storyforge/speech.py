@@ -7,7 +7,9 @@ Without whisper.cpp the browser's built-in speech recognition is used where it e
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -68,25 +70,26 @@ class Narrator:
         suffix = ".mp3" if tts_mode() == "elevenlabs" else ".wav"
         return AUDIO_DIR / f"sf_{story_id}_{index}{suffix}"
 
-    def prepare(self, story_id: str, index: int, text: str) -> None:
-        """Start synthesis in the background as soon as the page text exists."""
+    def prepare(self, story_id: str, index: int, text: str, speed: float = 1.0) -> None:
+        """Start synthesis in the background as soon as the page text exists. `speed` (ElevenLabs
+        only) below 1 reads more slowly, for the youngest readers."""
         if tts_mode() not in RECORDED:
             return
         key = f"{story_id}_{index}"
         if key in self._inflight or key in self._failed or self.path_for(story_id, index).is_file():
             return
-        task = asyncio.create_task(self._synthesize(story_id, index, text))
+        task = asyncio.create_task(self._synthesize(story_id, index, text, speed))
         self._inflight[key] = task
         task.add_done_callback(lambda _t: self._inflight.pop(key, None))
 
-    async def get(self, story_id: str, index: int, text: str) -> Path | None:
+    async def get(self, story_id: str, index: int, text: str, speed: float = 1.0) -> Path | None:
         """Return the narration file, waiting for it when it is still being made."""
         if tts_mode() not in RECORDED:
             return None
         path = self.path_for(story_id, index)
         if path.is_file():
             return path
-        self.prepare(story_id, index, text)
+        self.prepare(story_id, index, text, speed)
         task = self._inflight.get(f"{story_id}_{index}")
         if task:
             wait = settings.elevenlabs_timeout + 5 if tts_mode() == "elevenlabs" else 90
@@ -96,19 +99,19 @@ class Narrator:
                 return None
         return path if path.is_file() else None
 
-    async def _synthesize(self, story_id: str, index: int, text: str) -> None:
+    async def _synthesize(self, story_id: str, index: int, text: str, speed: float) -> None:
         if tts_mode() == "elevenlabs":
-            await self._synthesize_elevenlabs(story_id, index, text)
+            await self._synthesize_elevenlabs(story_id, index, text, speed)
         else:
             await self._synthesize_piper(story_id, index, text)
 
-    async def _synthesize_elevenlabs(self, story_id: str, index: int, text: str) -> None:
+    async def _synthesize_elevenlabs(self, story_id: str, index: int, text: str, speed: float) -> None:
         AUDIO_DIR.mkdir(parents=True, exist_ok=True)
         final = self.path_for(story_id, index)
         line = " ".join(text.split())
         started = time.monotonic()
         try:
-            audio, credits = await asyncio.to_thread(elevenlabs.synthesize, line)
+            audio, credits = await asyncio.to_thread(elevenlabs.synthesize, line, speed)
         except elevenlabs.TTSFailed as exc:
             self._failed.add(f"{story_id}_{index}")
             log.error("narration failed  story=%s page=%d  voice=elevenlabs  characters=%d  (%s); "
@@ -122,6 +125,57 @@ class Narrator:
         log.info("narration ready  story=%s page=%d  voice=elevenlabs  characters=%d  credits=%s  %.1fs",
                  story_id, index + 1, len(line), "?" if credits is None else credits, seconds)
         timings.record("narration", seconds=seconds, characters=len(line), credits=credits, voice="elevenlabs")
+
+    # ---- tap-a-word: one word and its definition ----
+
+    def word_path(self, word: str, definition: str, speed: float) -> Path:
+        """Shared by every story: the same word with the same definition, voice and speed is made once.
+        (No sf_<story> prefix, so clearing away an old story leaves these alone.)"""
+        spoken = f"{settings.elevenlabs_voice_id}|{settings.elevenlabs_model}|{speed}|{word}|{definition}"
+        digest = hashlib.sha1(spoken.encode("utf-8")).hexdigest()[:16]
+        slug = re.sub(r"[^a-z0-9]+", "-", word.lower()).strip("-")[:30] or "word"
+        return AUDIO_DIR / "words" / f"{slug}_{digest}.mp3"
+
+    async def get_word(self, word: str, definition: str, speed: float = 1.0) -> Path | None:
+        """The recording of "word. definition" (ElevenLabs only), made on the first tap and kept.
+        None when it cannot be made; the browser's voice reads it instead."""
+        if tts_mode() != "elevenlabs":
+            return None
+        path = self.word_path(word, definition, speed)
+        if path.is_file():
+            return path
+        key = path.name
+        if key in self._failed:
+            return None
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(self._synthesize_word(word, definition, speed, path))
+            self._inflight[key] = task
+            task.add_done_callback(lambda _t: self._inflight.pop(key, None))
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=settings.elevenlabs_timeout + 5)
+        except (asyncio.TimeoutError, Exception):
+            return None
+        return path if path.is_file() else None
+
+    async def _synthesize_word(self, word: str, definition: str, speed: float, path: Path) -> None:
+        line = " ".join(f"{word}. {definition}".split())
+        started = time.monotonic()
+        try:
+            audio, credits = await asyncio.to_thread(elevenlabs.synthesize, line, speed)
+        except elevenlabs.TTSFailed as exc:
+            self._failed.add(path.name)
+            log.error("word narration failed  word=%r  characters=%d  (%s); the browser's voice reads it",
+                      word, len(line), exc)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".part.mp3")
+        tmp.write_bytes(audio)
+        os.replace(tmp, path)
+        seconds = round(time.monotonic() - started, 1)
+        log.info("word narration ready  word=%r  voice=elevenlabs  characters=%d  credits=%s  %.1fs",
+                 word, len(line), "?" if credits is None else credits, seconds)
+        timings.record("word_narration", seconds=seconds, characters=len(line), credits=credits, voice="elevenlabs")
 
     async def _synthesize_piper(self, story_id: str, index: int, text: str) -> None:
         piper = _piper_path()

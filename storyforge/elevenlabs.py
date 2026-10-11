@@ -19,16 +19,19 @@ class TTSFailed(Exception):
     """A page could not be voiced; the browser's own voice reads it instead."""
 
 
-def synthesize(text: str) -> tuple[bytes, int | None]:
-    """Voice one page. Blocking; run it in a thread. Returns (MP3 bytes, credits charged when
-    ElevenLabs reports them). The whole exchange, connecting included, is limited to
-    ELEVENLABS_TIMEOUT_SECONDS."""
+def synthesize(text: str, speed: float = 1.0) -> tuple[bytes, int | None]:
+    """Voice one page (or one word and its definition). Blocking; run it in a thread. Returns
+    (MP3 bytes, credits charged when ElevenLabs reports them). `speed` below 1 reads more slowly.
+    The whole exchange, connecting included, is limited to ELEVENLABS_TIMEOUT_SECONDS."""
     if not settings.elevenlabs_api_key:
         raise TTSFailed("no key")
     url = urlparse(settings.elevenlabs_url)
     conn_cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
     deadline = time.monotonic() + settings.elevenlabs_timeout
-    body = json.dumps({"text": text, "model_id": settings.elevenlabs_model}).encode("utf-8")
+    request: dict = {"text": text, "model_id": settings.elevenlabs_model}
+    if speed != 1.0:
+        request["voice_settings"] = {"speed": speed}
+    body = json.dumps(request).encode("utf-8")
     path = (f"{url.path.rstrip('/')}/v1/text-to-speech/{quote(settings.elevenlabs_voice_id, safe='')}"
             "?output_format=mp3_44100_128")
     conn = conn_cls(url.hostname or "api.elevenlabs.io", url.port, timeout=settings.elevenlabs_timeout)

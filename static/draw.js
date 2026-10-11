@@ -10,6 +10,7 @@
   const canvas = $("canvas");
   const ctx = canvas.getContext("2d");
   const STORAGE_STORY = "storyforge.story"; // the same key the storybook uses to reopen a story
+  const STORAGE_LEVEL = "storyforge.level"; // the reading level, shared with the cover
   const GIVE_UP_MS = 45000; // the loading screen never waits longer than this
 
   const state = {
@@ -245,6 +246,7 @@
         preview_jpeg: render(512, "#ffffff").toDataURL("image/jpeg", 0.85),
         idea: new URLSearchParams(location.search).get("idea") || "",
         who: $("who").value.trim(),
+        reading_level: readingLevel(),
       };
       const response = await fetch("/api/stories/drawn", {
         method: "POST",
@@ -273,6 +275,21 @@
       clearTimeout(timer);
     }
   }
+
+  /* ───────── reading level ───────── */
+
+  function readingLevel() {
+    const checked = document.querySelector('input[name="reading-level"]:checked');
+    return checked ? checked.value : "early";
+  }
+  try {
+    const saved = localStorage.getItem(STORAGE_LEVEL);
+    const input = saved && document.querySelector(`input[name="reading-level"][value="${saved}"]`);
+    if (input) input.checked = true;
+  } catch (_) { /* private browsing */ }
+  $("levels").addEventListener("change", () => {
+    try { localStorage.setItem(STORAGE_LEVEL, readingLevel()); } catch (_) { /* private browsing */ }
+  });
 
   /* ───────── "Who is this?" ───────── */
 

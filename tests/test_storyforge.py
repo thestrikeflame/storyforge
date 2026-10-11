@@ -143,7 +143,10 @@ def tearDownModule():
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-    shutil.rmtree(TMP, ignore_errors=True)
+    if os.environ.get("STORYFORGE_KEEP_TEST_FILES") == "1":
+        print(f"test files kept in {TMP}", file=sys.stderr)
+    else:
+        shutil.rmtree(TMP, ignore_errors=True)
 
 
 class Parsing(unittest.TestCase):
@@ -470,6 +473,45 @@ class Parsing(unittest.TestCase):
         # the style asks for no lettering, said positively, right after the art style
         prompt = ImageWorker.build_background_prompt({}, {"setting": "a quiet harbour"})
         self.assertLess(prompt.index(CLEAN), prompt.index("quiet harbour"))
+
+    def test_reading_levels_set_the_page_length_and_style(self):
+        from storyforge import llm
+        for key, words in (("pre", "30 to 45"), ("early", "45 to 60"), ("confident", "60 to 80"), (None, "45 to 60")):
+            story = {"premise": "a dragon", "segments": [], **({"reading_level": key} if key else {})}
+            system, user = (m["content"] for m in llm.build_messages(story, None, False))
+            low, high = words.split(" to ")
+            self.assertIn(f"at least {low} and at most {high} words", system, key)
+            self.assertIn(f"{words} words in one or two short paragraphs", user, key)
+        pre = llm.build_messages({"premise": "x", "segments": [], "reading_level": "pre"}, None, False)[0]["content"]
+        self.assertIn("very short, simple sentences", pre)
+        rich = llm.build_messages({"premise": "x", "segments": [], "reading_level": "confident"}, None, False)[0]["content"]
+        self.assertIn("rich, vivid", rich)
+
+    def test_definitions_are_checked_against_the_page(self):
+        from storyforge import llm
+        page = ("Mira crept closer. The tenth mushroom glowed, and Pip felt curious.\n\n"
+                "Glowing moss covered a shimmering door. Pip peeked.")
+        raw = json.dumps({"words": [
+            {"word": "glowed", "definition": "gave off a soft light. Like a lamp does."},
+            {"word": "Mira", "definition": "the dragon"},                # a name (capitalised mid-sentence too)
+            {"word": "pip", "definition": "a friend"},                   # one of the hero's names
+            {"word": "zeppelin", "definition": "a big airship"},         # not on the page
+            {"word": "flicker", "definition": "to shine on and off"},    # not this form of the word
+            {"word": "Shimmering", "definition": "shining with a wavy light"},  # a different case is fine
+            {"word": "the", "definition": "a little word"},              # too easy
+            {"word": "GLOWED", "definition": "again"},                   # already there
+        ]})
+        found = llm.parse_definitions(raw, page, frozenset({"pip"}))
+        self.assertEqual(found, [
+            {"word": "glowed", "definition": "Gave off a soft light."},
+            {"word": "shimmering", "definition": "Shining with a wavy light."},
+        ])
+        with self.assertRaises(llm.WriterFailed):
+            llm.parse_definitions("no json here", page)
+        prompt = llm.build_definition_messages(page, llm.READING_LEVELS["pre"])[1]["content"]
+        self.assertIn(page, prompt)
+        self.assertIn("a pre-reader aged 3 to 5", prompt)
+        self.assertEqual(llm.definition_schema()["properties"]["words"]["maxItems"], 4)
 
     def test_prompt_stays_compact(self):
         from storyforge.llm import build_messages
@@ -962,6 +1004,33 @@ class ElevenLabsNarration(unittest.TestCase):
         self.assertIn("timed out", rows)
         self.assertIn("HTTP 500: boom", rows)
 
+    def test_4_pre_readers_hear_it_slower_and_tapped_words_are_voiced_once(self):
+        status, story = call("POST", f"{CLOUD}/api/stories", {"premise": "a sleepy bear", "reading_level": "pre"})
+        self.assertEqual((status, story["reading_level"]), (201, "pre"))
+        story_id = story["id"]
+        page = wait_ready(story_id, 0, CLOUD)
+        wait_for(lambda: (TMP / "cloud_data" / "audio" / f"sf_{story_id}_0.mp3").is_file())
+        self.assertEqual(call("GET", f"{HF}/state")[1]["tts_speeds"][" ".join(page["text"].split())], 0.9)
+        words = wait_for(lambda: segment(story_id, 0, CLOUD)["words"])
+        spoken = f"{words[0]['word']}. {words[0]['definition']}"
+        for _ in range(2):
+            status, kind, body = self.audio_path(f"{story_id}/segments/0/words/0/audio")
+            self.assertEqual((status, kind, body[:3]), (200, "audio/mpeg", b"ID3"))
+        state = call("GET", f"{HF}/state")[1]
+        self.assertEqual(state["tts_texts"].count(spoken), 1)  # made once, then kept
+        self.assertEqual(state["tts_speeds"][spoken], 0.9)
+        self.assertEqual(self.audio_path(f"{story_id}/segments/0/words/9/audio")[0], 404)  # only the page's own words
+        self.assertIn(f"word narration ready  word={words[0]['word']!r}  voice=elevenlabs  characters={len(spoken)}",
+                      (TMP / "cloud_logs" / "storyforge.log").read_text())
+
+    def audio_path(self, path: str):
+        request = urllib.request.Request(f"{CLOUD}/api/stories/{path}")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status, response.headers.get("Content-Type"), response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers.get("Content-Type"), exc.read()
+
     def test_3_without_a_key_the_browser_reads(self):
         code = "from storyforge import speech; print(speech.tts_mode())"
         env = dict(os.environ, STORYFORGE_SETTINGS=str(TMP / "none.env"), STORYFORGE_ENV_FILE=str(TMP / "none.env"),
@@ -1090,6 +1159,90 @@ class DrawnHero(unittest.TestCase):
             status, body = call("POST", f"{CLOUD}/api/stories/drawn", broken)
             self.assertEqual(status, 422, body)
             self.assertIn("message", body)
+
+
+def define_mode(**values) -> None:
+    call("POST", f"{LLM}/control", values)
+
+
+def llm_state() -> dict:
+    return call("GET", f"{LLM}/state")[1]
+
+
+class ReadingLevelsAndWords(unittest.TestCase):
+    """Reading levels on new stories, and tap-a-word definitions made while Qwen is idle."""
+
+    def setUp(self):
+        llm_mode("normal")
+        define_mode(define_delay=0.002, define_mode="normal")
+
+    def test_1_the_level_is_saved_with_the_story_and_shapes_the_prompt(self):
+        for level, words in (("pre", "30 to 45"), ("confident", "60 to 80"), (None, "45 to 60")):
+            status, story = call("POST", f"{BASE}/api/stories",
+                                 {"premise": "a brave little boat", **({"reading_level": level} if level else {})})
+            self.assertEqual((status, story["reading_level"]), (201, level or "early"))
+            wait_ready(story["id"], 0)
+            self.assertIn(f"{words} words", llm_state()["last_user"])
+            saved = json.loads((TMP / "data" / "sessions" / f"{story['id']}.json").read_text())
+            self.assertEqual(saved["reading_level"], level or "early")
+        status, body = call("POST", f"{BASE}/api/stories", {"premise": "a boat", "reading_level": "grown-up"})
+        self.assertEqual(status, 422, body)
+
+    def test_2_definitions_arrive_after_the_page_and_only_for_words_on_it(self):
+        story_id = new_story()
+        page = wait_ready(story_id, 0)
+        page = wait_for(lambda: (s := segment(story_id, 0)) and not s["words_pending"] and s, timeout=60)
+        rows = (TMP / "logs" / "storyforge.log").read_text()
+        self.assertEqual(rows.count(f"definitions ready  story={story_id} page=1 "), 1)
+        words = [w["word"] for w in page["words"]]
+        self.assertEqual(len(words), 3, page["words"])
+        self.assertNotIn("zeppelin", words)  # not on the page
+        self.assertNotIn("Mira", words)      # a name
+        for entry in page["words"]:
+            self.assertIn(entry["word"], page["text"])
+            self.assertTrue(entry["definition"].endswith("."))
+            self.assertNotIn("More words", entry["definition"])  # one sentence only
+        self.assertIn("an early reader aged 5 to 8", llm_state()["last_define_user"])
+        saved = json.loads((TMP / "data" / "sessions" / f"{story_id}.json").read_text())
+        self.assertEqual(saved["segments"][0]["words"], page["words"])
+        # without ElevenLabs the word endpoint says no, and the browser's voice reads it
+        self.assertEqual(call("GET", f"{BASE}/api/stories/{story_id}/segments/0/words/0/audio")[0], 404)
+
+    def test_3_a_new_page_never_waits_for_definitions(self):
+        define_mode(define_delay=0.4)  # definitions that would take about a minute
+        story_id = new_story()
+        wait_ready(story_id, 0)
+        before = llm_state()
+        wait_for(lambda: llm_state()["define_requests"] > before["define_requests"])
+        started = time.time()
+        status, _ = call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "after": 0})
+        self.assertEqual(status, 201)
+        wait_for(lambda: segment(story_id, 1)["text"])
+        self.assertLess(time.time() - started, 3)  # the page started straight away
+        wait_for(lambda: llm_state()["define_cancelled"] > before["define_cancelled"])
+        self.assertTrue(segment(story_id, 0)["words_pending"])
+        define_mode(define_delay=0.002)
+        wait_ready(story_id, 1)
+        # both pages get their words once the writer is idle again
+        wait_for(lambda: segment(story_id, 0)["words"] and segment(story_id, 1)["words"], timeout=60)
+        rows = (TMP / "logs" / "storyforge.log").read_text()
+        self.assertIn(f"definitions paused  story={story_id} page=1", rows)
+
+    def test_4_unusable_definitions_are_tried_twice_then_left_out(self):
+        define_mode(define_mode="garbage")
+        story_id = new_story()
+        wait_ready(story_id, 0)
+        page = wait_for(lambda: (s := segment(story_id, 0)) and not s["words_pending"] and s)
+        self.assertEqual(page["words"], [])
+        rows = (TMP / "logs" / "storyforge.log").read_text()
+        self.assertIn(f"definitions failed  story={story_id} page=1  attempt=2", rows)
+
+    def test_5_a_drawn_hero_story_keeps_its_level(self):
+        payload, _ = drawing_payload()
+        status, body = call("POST", f"{CLOUD}/api/stories/drawn", dict(payload, reading_level="confident"))
+        self.assertEqual((status, body["reading_level"]), (201, "confident"))
+        status, body = call("POST", f"{CLOUD}/api/stories/drawn", dict(payload, reading_level="adult"))
+        self.assertEqual(status, 422)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@
   const body = document.body;
   const STORAGE_STORY = "storyforge.story";
   const STORAGE_MUTED = "storyforge.muted";
+  const STORAGE_LEVEL = "storyforge.level"; // the reading level, shared with /draw
 
   const state = {
     config: { tts: "browser", server_stt: false, images: true, https_port: null, max_premise_chars: 600, max_action_chars: 300 },
@@ -531,7 +532,7 @@
         const utterance = new SpeechSynthesisUtterance(sentence);
         const voice = this.voice();
         if (voice) { utterance.voice = voice; utterance.lang = voice.lang; } else utterance.lang = "en-US";
-        utterance.rate = 0.94;
+        utterance.rate = speechRate();
         utterance.onstart = () => { started = true; };
         utterance.onboundary = (event) => {
           if (run === this.run) this.setProgress((this.spokenChars + event.charIndex) / this.totalChars);
@@ -608,6 +609,11 @@
     },
   };
 
+  // Pre-readers hear the story a little more slowly (the server does the same for ElevenLabs).
+  function speechRate() {
+    return state.story && state.story.readingLevel === "pre" ? 0.82 : 0.94;
+  }
+
   function renderNarration() {
     const page = currentPage();
     const hasText = Boolean(page && page.text_complete && page.text);
@@ -638,7 +644,8 @@
   const lastIndex = () => (state.story ? state.story.pages.length - 1 : -1);
   const imageSettled = (page) => ["completed", "failed", "skipped", "none"].includes(page.image.status);
   const needsWatching = (page) =>
-    page.status === "writing" || (page.status === "ready" && ["queued", "generating"].includes(page.image.status));
+    page.status === "writing" || (page.status === "ready" && ["queued", "generating"].includes(page.image.status))
+    || (page.status === "ready" && page.words_pending); // tap-a-word definitions are still coming
 
   function renderHeader() {
     const story = state.story;
@@ -667,9 +674,11 @@
     problem.hidden = true;
     words.classList.toggle("opening", page.index === 0);
     words.classList.toggle("writing", page.status === "writing" && !page.text_complete && Boolean(page.text));
-    const key = `${state.story.id}:${page.index}:${page.text}`;
+    const defined = page.status === "ready" ? page.words || [] : [];
+    const key = `${state.story.id}:${page.index}:${page.text}:${defined.map((w) => w.word).join("|")}`;
     if (key === shownText) return;
     shownText = key;
+    wordTip.close();
     if (!page.text) {
       words.replaceChildren(Object.assign(document.createElement("p"), { className: "thinking", textContent: "The storyteller is thinking" }));
       return;
@@ -683,7 +692,131 @@
       else words.appendChild(Object.assign(document.createElement("p"), { textContent: text }));
     });
     existing.slice(paragraphs.length).forEach((el) => el.remove());
+    if (defined.length) underlineWords([...words.querySelectorAll("p")], defined);
   }
+
+  /* Tap-a-word: each defined word gets a dotted underline where it first appears on the page.
+   * The text itself is unchanged, so nothing moves. */
+  function underlineWords(paragraphs, defined) {
+    const marks = paragraphs.map(() => []);
+    defined.forEach((entry, n) => {
+      const escaped = entry.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // No lookbehind (older Safari): the character before the word is matched and skipped.
+      const pattern = new RegExp(`(^|[^\\w'’-])(${escaped})(?![\\w'’-])`, "i");
+      for (let i = 0; i < paragraphs.length; i++) {
+        const found = pattern.exec(paragraphs[i].textContent);
+        if (!found) continue;
+        const start = found.index + found[1].length;
+        const end = start + found[2].length;
+        if (!marks[i].some((m) => start < m.end && m.start < end)) marks[i].push({ start, end, n });
+        break;
+      }
+    });
+    paragraphs.forEach((p, i) => {
+      if (!marks[i].length) return;
+      const text = p.textContent;
+      const parts = [];
+      let at = 0;
+      marks[i].sort((a, b) => a.start - b.start).forEach((m) => {
+        if (m.start > at) parts.push(document.createTextNode(text.slice(at, m.start)));
+        const word = document.createElement("span");
+        word.className = "word";
+        word.textContent = text.slice(m.start, m.end);
+        word.dataset.n = String(m.n);
+        word.setAttribute("role", "button");
+        word.setAttribute("tabindex", "0");
+        word.setAttribute("aria-expanded", "false");
+        word.setAttribute("aria-label", `${word.textContent}: what does it mean?`);
+        parts.push(word);
+        at = m.end;
+      });
+      if (at < text.length) parts.push(document.createTextNode(text.slice(at)));
+      p.replaceChildren(...parts);
+    });
+  }
+
+  const wordTip = {
+    el: null,       // the underlined word whose bubble is open
+    audio: null,    // its own <audio> element; always started by the tap itself
+    run: 0,
+    resumePage: -1, // the page whose narration was paused for the word, to carry on afterwards
+
+    open(el) {
+      const page = currentPage();
+      const entry = page && (page.words || [])[Number(el.dataset.n)];
+      if (!entry) return;
+      if (this.el && this.el !== el) this.el.setAttribute("aria-expanded", "false");
+      this.el = el;
+      el.setAttribute("aria-expanded", "true");
+      $("word-bubble-word").textContent = entry.word.charAt(0).toUpperCase() + entry.word.slice(1);
+      $("word-bubble-text").textContent = entry.definition;
+      const bubble = $("word-bubble");
+      bubble.hidden = false;
+      this.place();
+      this.say(page, Number(el.dataset.n), entry);
+    },
+
+    place() {
+      if (!this.el) return;
+      const bubble = $("word-bubble");
+      const rect = this.el.getBoundingClientRect();
+      const width = bubble.offsetWidth, height = bubble.offsetHeight, gap = 8, edge = 16;
+      const left = Math.max(edge, Math.min(window.innerWidth - width - edge, rect.left + rect.width / 2 - width / 2));
+      let top = rect.bottom + gap;
+      if (top + height > window.innerHeight - edge) top = Math.max(edge, rect.top - height - gap);
+      bubble.style.left = `${Math.round(left)}px`;
+      bubble.style.top = `${Math.round(top)}px`;
+    },
+
+    say(page, n, entry) {
+      const run = ++this.run;
+      if (narrator.playing && narrator.page === page.index) {
+        narrator.pause();
+        this.resumePage = page.index;
+      }
+      const done = () => {
+        if (run !== this.run) return;
+        const current = currentPage();
+        if (this.resumePage >= 0 && current && current.index === this.resumePage && !state.muted) {
+          narrator.resume(current.index, current.text);
+        }
+        this.resumePage = -1;
+      };
+      const browserVoice = () => {
+        if (run !== this.run) return;
+        if (!("speechSynthesis" in window)) { done(); return; }
+        try { speechSynthesis.cancel(); } catch (_) { /* nothing queued */ }
+        const utterance = new SpeechSynthesisUtterance(`${entry.word}. ${entry.definition}`);
+        const voice = narrator.canSpeak ? narrator.voice() : null;
+        if (voice) { utterance.voice = voice; utterance.lang = voice.lang; } else utterance.lang = "en-US";
+        utterance.rate = speechRate();
+        utterance.onend = done;
+        utterance.onerror = done;
+        this.current = utterance; // keep a reference; some browsers drop events otherwise
+        speechSynthesis.speak(utterance);
+      };
+      if (state.config.tts !== "elevenlabs") { browserVoice(); return; }
+      if (!this.audio) this.audio = new Audio();
+      const audio = this.audio;
+      audio.onended = done;
+      audio.onerror = browserVoice; // no recording for this word: the browser's voice reads it
+      audio.src = `/api/stories/${state.story.id}/segments/${page.index}/words/${n}/audio`;
+      audio.play().catch((error) => { if (error && error.name === "NotAllowedError") browserVoice(); });
+    },
+
+    stop() {
+      this.run += 1;
+      this.resumePage = -1;
+      if (this.audio) this.audio.pause();
+    },
+
+    close() {
+      if (!this.el) return;
+      this.el.setAttribute("aria-expanded", "false");
+      this.el = null;
+      $("word-bubble").hidden = true;
+    },
+  };
 
   let shownPicture = null;
   let shownProps = "";
@@ -840,6 +973,7 @@
     if (!state.story) return;
     const target = Math.max(0, Math.min(lastIndex(), index));
     if (target !== state.view || turn) {
+      wordTip.stop(); wordTip.close();
       narrator.stop();
       premiseMic.stop(); ideaMic.stop();
     }
@@ -865,6 +999,7 @@
       premise: data.premise,
       ended: data.ended,
       heroUrl: data.hero_url || "/static/art/hero-placeholder.png",
+      readingLevel: data.reading_level || "early",
       pages: data.segments.map((seg, i) => Object.assign({}, previous[i] ? { pictureBroken: previous[i].pictureBroken } : {}, seg)),
     };
     store(STORAGE_STORY, data.id);
@@ -928,7 +1063,7 @@
     submit.textContent = "Opening the book";
     premiseMic.stop();
     try {
-      const data = await api("POST", "/api/stories", { premise });
+      const data = await api("POST", "/api/stories", { premise, reading_level: readingLevel() });
       const old = recall(STORAGE_STORY);
       if (old && old !== data.id) api("POST", `/api/stories/${old}/abandon`).catch(() => {});
       state.chooseNow.clear();
@@ -1082,6 +1217,28 @@
     readyHint: "Got it. Press Make it happen.",
   });
 
+  function readingLevel() {
+    const checked = document.querySelector('input[name="reading-level"]:checked');
+    return checked ? checked.value : "early";
+  }
+  $("levels").addEventListener("change", () => store(STORAGE_LEVEL, readingLevel()));
+
+  // Tap-a-word: a tap (or Enter / Space) on an underlined word opens its bubble and reads it aloud.
+  $("words").addEventListener("click", (event) => {
+    const word = event.target.closest(".word");
+    if (word) wordTip.open(word);
+  });
+  $("words").addEventListener("keydown", (event) => {
+    const word = event.target.closest(".word");
+    if (word && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); wordTip.open(word); }
+  });
+  document.addEventListener("click", (event) => {
+    if (wordTip.el && !event.target.closest(".word, #word-bubble")) wordTip.close();
+  });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") wordTip.close(); });
+  window.addEventListener("resize", () => wordTip.place());
+  window.addEventListener("scroll", () => wordTip.place(), { passive: true });
+
   $("start").addEventListener("click", openInvite);
   $("invite-back").addEventListener("click", () => { premiseMic.stop(); setView("landing"); $("start").focus(); });
   $("premise-form").addEventListener("submit", (event) => {
@@ -1164,6 +1321,9 @@
 
   (async function boot() {
     state.muted = recall(STORAGE_MUTED) === "1";
+    const level = recall(STORAGE_LEVEL);
+    const levelInput = level && document.querySelector(`input[name="reading-level"][value="${level}"]`);
+    if (levelInput) levelInput.checked = true;
     scatterMotes();
     try {
       state.config = Object.assign(state.config, await api("GET", "/api/config"));
