@@ -535,6 +535,9 @@ class Flow(unittest.TestCase):
         status, body = call("GET", f"{BASE}/")
         self.assertEqual(status, 200)
         self.assertIn(b"Start Journey", body)
+        # shown while iOS keeps sound locked until a tap (e.g. straight after Done on /draw)
+        self.assertIn(b'id="tap-to-hear"', body)
+        self.assertIn(b"Tap to hear your story!", body)
         for asset in ("app.js", "style.css"):
             self.assertEqual(call("GET", f"{BASE}/static/{asset}")[0], 200)
         status, health = call("GET", f"{BASE}/api/health")

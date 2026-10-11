@@ -414,6 +414,7 @@
     audio: null,     // { run, text } while the element holds this page's recording
     unlocked: false,
     blocked: false,  // the browser refused to play without a tap
+    needsTap: false, // sound is locked until a tap: the "Tap to hear your story!" overlay shows
     sentences: [],
     sentenceIndex: 0,
     spokenChars: 0,
@@ -448,7 +449,8 @@
     },
 
     unlock(event) {
-      // The play bar's own buttons start, pause and resume narration themselves.
+      // The play bar's own buttons and the overlay start, pause and resume narration themselves.
+      if (event && event.target && event.target.closest && event.target.closest("#tap-to-hear")) return;
       const own = event && event.target && event.target.closest && event.target.closest("#narration, #narration-toggle");
       if (this.blocked && !own) {
         this.blocked = false;
@@ -462,17 +464,44 @@
       }
       if (this.unlocked) return;
       this.unlocked = true;
-      // A touch that was really a scroll does not count as a tap: try again on the next one.
-      const refused = (error) => { if (error && error.name === "NotAllowedError") this.unlocked = false; };
-      if (!this.audio) {
-        this.el.src = SILENT_WAV;
-        this.el.play().then(() => { if (!this.audio) this.el.pause(); }).catch(refused);
-      } else if (!this.playing) {
-        this.el.play().then(() => { if (!this.playing) this.el.pause(); }).catch(refused);
-      }
+      this.playSilently();
       if (this.canSpeak && !this.playing) {
         try { speechSynthesis.speak(new SpeechSynthesisUtterance(" ")); } catch (_) { /* ignore */ }
       }
+    },
+
+    // Plays the element without a sound of its own: inside a tap this unlocks it; outside one it
+    // finds out whether it is still locked.
+    playSilently() {
+      // A touch that was really a scroll does not count as a tap: try again on the next one.
+      const refused = (error) => {
+        if (error && error.name === "NotAllowedError") { this.unlocked = false; this.locked(); }
+      };
+      const played = () => this.heard();
+      if (!this.audio) {
+        this.el.src = SILENT_WAV;
+        this.el.play().then(() => { played(); if (!this.audio) this.el.pause(); }).catch(refused);
+      } else if (!this.playing) {
+        this.el.play().then(() => { played(); if (!this.playing) this.el.pause(); }).catch(refused);
+      }
+    },
+
+    // When a story opens without a tap (straight after Done on /draw), check at once whether
+    // sound is locked, so the overlay is there before page 1 is even written.
+    probe() {
+      if (this.unlocked || this.mode === "none" || state.muted) return;
+      this.unlocked = true; // until the browser says otherwise
+      this.playSilently();
+    },
+
+    locked() {
+      this.needsTap = true;
+      renderNarration();
+    },
+
+    heard() {
+      this.unlocked = true;
+      if (this.needsTap) { this.needsTap = false; renderNarration(); }
     },
 
     voice() {
@@ -501,10 +530,11 @@
     },
 
     play(run) {
-      this.el.play().catch((error) => {
+      this.el.play().then(() => this.heard()).catch((error) => {
         if (!this.audio || this.audio.run !== run) return;
         this.playing = false;
         this.blocked = error && error.name === "NotAllowedError"; // waits for a tap
+        if (this.blocked) this.needsTap = true;
         renderNarration();
       });
     },
@@ -533,7 +563,7 @@
         const voice = this.voice();
         if (voice) { utterance.voice = voice; utterance.lang = voice.lang; } else utterance.lang = "en-US";
         utterance.rate = speechRate();
-        utterance.onstart = () => { started = true; };
+        utterance.onstart = () => { started = true; this.heard(); };
         utterance.onboundary = (event) => {
           if (run === this.run) this.setProgress((this.spokenChars + event.charIndex) / this.totalChars);
         };
@@ -547,7 +577,7 @@
         };
         utterance.onerror = (event) => {
           if (run !== this.run || event.error === "interrupted" || event.error === "canceled") return;
-          if (event.error === "not-allowed") { this.playing = false; this.blocked = true; renderNarration(); return; } // needs a tap first
+          if (event.error === "not-allowed") { this.playing = false; this.blocked = true; this.needsTap = true; renderNarration(); return; } // needs a tap first
           this.unavailable();
         };
         this.current = utterance; // keep a reference; some browsers drop events otherwise
@@ -635,6 +665,8 @@
     playButton.setAttribute("aria-label", playingHere ? "Pause narration" : "Play narration");
     if (narrator.page !== state.view) narrator.setProgress(0);
     $("narration-toggle").setAttribute("aria-pressed", String(!state.muted));
+    // "Tap to hear your story!" while sound is locked (iOS Safari before the first tap).
+    $("tap-to-hear").hidden = !(narrator.needsTap && available && !state.muted && body.dataset.view === "reading");
     $("narration-toggle-label").textContent = state.muted ? "Narration off" : "Narration on";
   }
 
@@ -1187,6 +1219,7 @@
     setView("reading");
     renderAll();
     watch();
+    narrator.probe();
   }
 
   // /draw sends the reader here as /?story=<id> once their hero's story has started.
@@ -1287,6 +1320,24 @@
     if (!page) return;
     if (narrator.playing && narrator.page === state.view) narrator.pause();
     else narrator.resume(page.index, page.text);
+  });
+  // The overlay's tap is the one iOS needs: it starts this page's narration right now, inside the tap,
+  // or (when the words are not written yet) unlocks the sound so narration starts by itself.
+  $("tap-to-hear").addEventListener("click", () => {
+    narrator.needsTap = false;
+    narrator.blocked = false;
+    const page = currentPage();
+    if (state.muted || narrator.mode === "none") { renderNarration(); return; }
+    if (page && page.text_complete && page.text) {
+      if (narrator.page === page.index && !narrator.finished()) narrator.resume(page.index, page.text);
+      else narrator.start(page.index, page.text);
+    } else {
+      narrator.unlocked = true;
+      narrator.playSilently();
+      if (narrator.canSpeak) { try { speechSynthesis.speak(new SpeechSynthesisUtterance(" ")); } catch (_) { /* ignore */ } }
+    }
+    renderNarration();
+    $("words").focus({ preventScroll: true });
   });
   $("narration-replay").addEventListener("click", () => {
     const page = currentPage();
