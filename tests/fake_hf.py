@@ -37,7 +37,8 @@ DESCRIPTION = "A round orange cat with a tall green hat and a long striped tail.
 
 
 def drawing_png(size: int = 96) -> bytes:
-    """A child's drawing on white: a dark ring around a white face, and a red body below it."""
+    """A child's drawing on white: a dark ring around a white face, and a red body below it. The
+    paper has a faint grain (still white), so the PNG is as big as a real picture would be."""
     rows = []
     for y in range(size):
         row = bytearray(b"\x00")
@@ -48,7 +49,8 @@ def drawing_png(size: int = 96) -> bytes:
             elif abs(x - size / 2) < size * .08 and size * .58 < y < size * .85:
                 row += bytes((230, 80, 60))
             else:
-                row += bytes((255, 255, 255))
+                grain = 255 - os.urandom(1)[0] % 6
+                row += bytes((grain, grain, grain))
         rows.append(bytes(row))
 
     def chunk(kind: bytes, data: bytes) -> bytes:
