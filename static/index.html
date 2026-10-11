@@ -126,20 +126,12 @@
   <!-- Describe your story -->
   <section class="invite" id="invite" aria-labelledby="invite-heading" hidden>
     <h2 id="invite-heading">Let's embark on a journey and bring your imagination to life.</h2>
-    <p class="invite-how" id="invite-how">Hold the microphone icon and describe your basic story.</p>
-
-    <div class="mic-wrap">
-      <button class="mic" id="premise-mic" type="button" aria-label="Hold to speak your story idea">
-        <span class="mic-rings" aria-hidden="true"></span>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M8.5 21h7"/></svg>
-      </button>
-      <div class="bars" id="premise-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-    </div>
+    <p class="invite-how" id="invite-how">Type your story idea below.</p>
     <p class="mic-status" id="premise-mic-status" role="status"></p>
 
     <form class="premise-form" id="premise-form">
       <label class="visually-hidden" for="premise">Your story idea</label>
-      <textarea id="premise" rows="2" placeholder="Or type it here. For example: a small purple dragon finds a mysterious door in an enchanted forest."></textarea>
+      <textarea id="premise" rows="2" placeholder="For example: a small purple dragon finds a mysterious door in an enchanted forest."></textarea>
       <fieldset class="levels" id="levels">
         <legend>Who is reading?</legend>
         <label><input type="radio" name="reading-level" value="pre"><span>Pre-reader</span></label>
@@ -240,12 +232,8 @@
       <h2 id="next-heading">What happens next?</h2>
       <div class="choices" id="choices"></div>
       <form class="own-idea" id="own-idea-form">
-        <button class="mic small" id="idea-mic" type="button" aria-label="Hold to speak your own idea">
-          <span class="mic-rings" aria-hidden="true"></span>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M8.5 21h7"/></svg>
-        </button>
         <label class="visually-hidden" for="own-idea">Your own idea for what happens next</label>
-        <input id="own-idea" type="text" autocomplete="off" placeholder="Or describe your own idea">
+        <input id="own-idea" type="text" autocomplete="off" placeholder="Describe your own idea">
         <button class="primary small" id="own-idea-submit" type="submit">Make it happen</button>
       </form>
       <p class="mic-status" id="idea-mic-status" role="status"></p>

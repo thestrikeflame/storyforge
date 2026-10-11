@@ -489,29 +489,6 @@
   /* ───────── "Who is this?" ───────── */
 
   $("who-form").addEventListener("submit", (event) => { event.preventDefault(); $("who").blur(); });
-  // Saying it: the browser's own speech recognition, where there is one (Chrome, Edge, Safari;
-  // it needs https or localhost). Typing always works, and phone keyboards have a mic too.
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (Recognition && window.isSecureContext) {
-    const mic = $("who-mic");
-    let listening = null;
-    mic.hidden = false;
-    mic.addEventListener("click", () => {
-      if (listening) { listening.stop(); return; }
-      const rec = new Recognition();
-      rec.lang = document.documentElement.lang || "en";
-      rec.interimResults = true;
-      rec.maxAlternatives = 1;
-      rec.onresult = (event) => {
-        $("who").value = Array.from(event.results).map((r) => r[0].transcript).join("").slice(0, 60);
-      };
-      rec.onend = rec.onerror = () => { listening = null; mic.classList.remove("listening"); };
-      listening = rec;
-      mic.classList.add("listening");
-      try { rec.start(); } catch (_) { rec.onend(); }
-    });
-  }
-
   $("done").addEventListener("click", done);
   $("busy-retry").addEventListener("click", done);
   $("busy-close").addEventListener("click", () => { $("busy").hidden = true; });

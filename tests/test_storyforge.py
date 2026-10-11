@@ -691,6 +691,11 @@ class Flow(unittest.TestCase):
         self.assertIn(b"Start with an idea", body)
         # the opening (skippable, once per visit) and the story page's chapter row
         self.assertIn(b"A story is waking up...", body)
+        # no microphone anywhere: ideas and "Who is this?" are typed
+        for page, mic in (("/", b'id="premise-mic"'), ("/", b'id="idea-mic"'), ("/draw", b'id="who-mic"')):
+            self.assertNotIn(mic, call("GET", f"{BASE}{page}")[1])
+        for script in ("app.js", "draw.js"):
+            self.assertNotIn("SpeechRecognition", (ROOT / "static" / script).read_text())
         self.assertIn(b"intro=1", body)              # ?intro=1 always plays it
         self.assertIn(b'id="title-replay"', body)    # tapping the title plays it again
         self.assertIn(b'id="chapter-progress"', body)
