@@ -554,13 +554,65 @@ class Parsing(unittest.TestCase):
         self.assertIn("together they find a clue", llm.page_beat(pre, 2, final=False))
         self.assertIn("solve it together", llm.page_beat(pre, 3, final=False))
 
+    def test_gentle_and_length_checks_on_a_page(self):
+        from storyforge import llm
+        page = ("Mira woke up early. The dragons started to fight over a sword. She flew to the river.\n\n"
+                "The water sparkled in the sun. A friendly frog waved hello. They laughed together all day.")
+        text, notes = llm.tidy_page(page, 200, floor=10)
+        self.assertNotIn("fight", text)
+        self.assertNotIn("sword", text)
+        self.assertEqual(notes, {"gentle": 1, "trimmed_from": 0})
+        self.assertIn("\n\n", text)  # paragraphs kept
+        # too short to drop it: softened instead
+        text, notes = llm.tidy_page("The dragons started to fight with a sword.", 200, floor=10)
+        self.assertEqual(text, "The dragons started to game with a toy.")  # odd, but gentle and never empty
+        self.assertEqual(notes["gentle"], 1)
+        # length: whole sentences up to the maximum, the first one always
+        text, notes = llm.tidy_page(page, 12)
+        self.assertEqual(text, "Mira woke up early. She flew to the river.")
+        self.assertEqual(notes["trimmed_from"], 25)  # counted after the rough sentence went
+        self.assertEqual(llm.tidy_page("One very long first sentence that goes on and on.", 3)[0],
+                         "One very long first sentence that goes on and on.")
+        self.assertEqual(llm.goal_sentence("mira finds the pearl"), "Mira finds the pearl.")
+        goal = "Mira finds the moon pearl hidden in a shell and names it Shimmer"
+        self.assertFalse(llm.goal_reached(goal, "Mira said goodnight. The wood was silver with moonlight.", "Mira"))
+        self.assertTrue(llm.goal_reached(goal, "Inside a shell lay the moon pearl! Mira named it Shimmer.", "Mira"))
+
+    def test_outline_is_gentle_and_names_real_kinds(self):
+        from storyforge import llm
+        story = {"id": "abc", "premise": "p", "segments": [],
+                 "hero_description": "a cartoon dog-like creature with a pink tongue"}
+        raw = json.dumps({"hero_name": "Poochie", "hero_kind": "good boy", "goal": "find the lost puppy",
+                          "obstacle": "a village dog fight", "goal_done": "Poochie finds the puppy, named Biscuit",
+                          "ending": "everyone is home", "friends": [{"name": "Barky", "kind": "buddy"},
+                                                                    {"name": "Pim", "kind": "silver moth"}]})
+        outline = llm.parse_outline(raw, story)
+        self.assertIn(outline["obstacle"], llm.GENTLE_OBSTACLES)
+        self.assertTrue(outline["softened"])
+        self.assertEqual(outline["hero_kind"], "dog")
+        self.assertEqual(outline["friends"], [{"name": "Barky", "kind": "friend"}, {"name": "Pim", "kind": "silver moth"}])
+        self.assertEqual(outline["goal_done"], "Poochie finds the puppy, named Biscuit")
+        story["outline"] = outline
+        self.assertEqual(llm.must_show(story, "Run to the barn", final=True),
+                         "Run to the barn, and then Poochie finds the puppy, named Biscuit")
+        self.assertEqual(llm.must_show(story, None, final=True), "Poochie finds the puppy, named Biscuit")
+        self.assertEqual(llm.must_show(story, "Run to the barn", final=False), "Run to the barn")
+        prompt = llm.build_outline_messages(story)[1]["content"]
+        self.assertIn("Never a fight, a chase or anything scary", prompt)
+        self.assertIn('"goal_done"', prompt)
+
     def test_choices_are_forks_not_small_actions(self):
         from storyforge import llm
         raw = json.dumps({"setting": "a reef", "visual_details": ["a", "b"], "props": [], "action": "swimming",
                           "segment": " ".join(["word"] * 50), "visual_prompt": "v", "continuity_summary": "s",
-                          "choices": ["Look closer at the shell", "Sail to the singing island", "Ask the old turtle for help"]})
+                          "choices": ["Look closer at the shell", "sail to the singing island", "Ask the old turtle for help"]})
         page = llm.parse_page(raw, first=False, final=False)
-        self.assertEqual(page.choices, ["Sail to the singing island", "Ask the old turtle for help"])
+        self.assertEqual(page.choices, ["Sail to the singing island", "Ask the old turtle for help"])  # capitalised too
+        story = {"premise": "p", "segments": [{"status": "ready", "text": "x"}], "hero_name": "Crabby",
+                 "outline": {"goal": "find the pearl", "obstacle": "a wave", "friends": [], "goal_done": "g",
+                             "ending": "home", "pages": 6}}
+        later = llm.build_messages(story, "Go", False)[1]["content"]
+        self.assertIn("so each choice is a different way toward it: Crabby and a friend discover a clue", later)
         schema = llm.response_schema(False, False)["properties"]["choices"]
         self.assertEqual((schema["minItems"], schema["maxItems"]), (2, 3))
 
@@ -1225,6 +1277,12 @@ def llm_state() -> dict:
     return call("GET", f"{LLM}/state")[1]
 
 
+def all_logs() -> str:
+    """The test app's log, rotated files included (a full run writes more than one file's worth)."""
+    files = sorted((TMP / "logs").glob("storyforge.log*"), key=lambda p: p.stat().st_mtime)
+    return "".join(p.read_text(errors="replace") for p in files)
+
+
 class StoryPlot(unittest.TestCase):
     """A choose-your-own-adventure plot: an outline when the story starts, a beat per page, and an
     ending on time (Pre-reader 4 pages)."""
@@ -1252,17 +1310,41 @@ class StoryPlot(unittest.TestCase):
         sent = llm_state()["last_user"]
         self.assertIn("the LAST page", sent)
         self.assertIn("This page's beat: The happy ending: Mira returns the moon pearl", sent)
+        # the last page must show the goal reached; the fake's page does not, so it is added at the end
+        self.assertTrue(sent.endswith("This page must show: Fly over the silver river, and then "
+                                      "Mira finds the moon pearl hidden in a shell and names it Shimmer"), sent[-200:])
+        self.assertTrue(page["text"].endswith("Mira finds the moon pearl hidden in a shell and names it Shimmer."), page["text"])
         self.assertTrue(page["final"])
         self.assertEqual(page["choices"], [])
+        # every page within the Pre-reader length (the fake's pages are longer: trimmed at a sentence)
+        for n in range(4):
+            self.assertLessEqual(len(segment(story_id, n)["text"].split()), 45, n)
         status, body = call("GET", f"{BASE}/api/stories/{story_id}")
         self.assertTrue(body["ended"])
         saved = json.loads((TMP / "data" / "sessions" / f"{story_id}.json").read_text())
         self.assertEqual([s["beat"].split(":")[0].split()[0] for s in saved["segments"]], ["Show", "Mira", "The", "The"])
         status, _ = call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "after": 3})
         self.assertEqual(status, 409)  # the story has ended
-        rows = (TMP / "logs" / "storyforge.log").read_text()
+        # the page is marked ready a moment before its check lines are logged
+        rows = wait_for(lambda: (r := all_logs()) and f"page written  story={story_id} page=4" in r and r)
         self.assertIn(f"outline ready  story={story_id}", rows)
         self.assertRegex(rows, rf"page beat  story={story_id} page=4  beat='The happy ending: .*'  \(last page\)")
+        self.assertRegex(rows, rf"page check failed  story={story_id} page=\d  check=length  trimmed from \d+ to \d+ words \(level pre, at most 45\)")
+        # The goal is on the last page either way: written by the (fake) model when it was in the prompt
+        # as plain text, or added as a closing sentence ("check=goal") when the page missed it.
+        saved = json.loads((TMP / "data" / "sessions" / f"{story_id}.json").read_text())
+        self.assertIn(saved["segments"][3]["goal_check"], ("passed", "added"))
+        if saved["segments"][3]["goal_check"] == "added":
+            self.assertIn(f"page check failed  story={story_id} page=4  check=goal", rows)
+
+    def test_3_a_rough_sentence_never_reaches_the_page(self):
+        story_id = new_story()
+        wait_ready(story_id, 0)
+        call("POST", f"{LLM}/control", {"rough_pages": 1})
+        call("POST", f"{BASE}/api/stories/{story_id}/continue", {"kind": "continue", "after": 0})
+        page = wait_ready(story_id, 1)
+        self.assertNotIn("fight", page["text"])
+        wait_for(lambda: f"page check failed  story={story_id} page=2  check=gentle" in all_logs())
 
     def test_2_without_an_outline_the_story_still_gets_written(self):
         call("POST", f"{LLM}/control", {"outline_mode": "garbage"})

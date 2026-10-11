@@ -122,23 +122,45 @@ def _update_partial(story: dict, seg: dict, stream: llm.LLMStream, started: floa
     cleaned = llm.clean_text(text, 1800)
     # Words are counted before the repeat filter, which never takes a page under the minimum.
     if not complete or llm.word_count(cleaned) < llm.minimum_words() or '"visual_prompt"' in cleaned:
-        seg["partial"] = llm.drop_repeats(cleaned, check["earlier"], finished_only=True)[0]
+        # While it streams: only finished sentences that are new, gentle and within the length.
+        shown = llm.drop_repeats(cleaned, check["earlier"], finished_only=True)[0]
+        seg["partial"] = llm.tidy_page(shown, check["max_words"])[0]
         return
     cleaned, dropped = llm.drop_repeats(cleaned, check["earlier"], floor=llm.minimum_words())
-    seg["partial"] = cleaned
     seg["repeats_dropped"] = dropped
-    if check["event"]:
-        if llm.choice_followed(check["event"], cleaned, check["known"]):
-            seg["choice_check"] = "passed"
-        else:
-            cleaned = f"{llm.bridge_sentence(check['event'], check['hero'])} {cleaned}"
-            seg["choice_check"] = "bridged"
-            seg["partial"] = cleaned
+    cleaned = _final_touches(seg, cleaned, check)
+    seg["partial"] = cleaned
     seg["text"] = cleaned
     _choose_props(story, seg, cleaned)
     seg["text_complete"] = True
     seg["timings"]["text_seconds"] = round(time.monotonic() - started, 1)
     narrator.prepare(story["id"], seg["index"], cleaned, _voice_speed(story))
+
+
+def _final_touches(seg: dict, text: str, check: dict) -> str:
+    """The last checks on a finished page, after the repeat filter:
+    gentle (a rough sentence dropped, or its words softened), the reader's choice (a bridge sentence
+    in front when the page missed it), the reading level's length (whole sentences up to its
+    maximum), and on the last page the quest's goal (a closing sentence when the page missed it)."""
+    text, notes = llm.tidy_page(text, 10_000, floor=llm.minimum_words())
+    seg["gentle_fixed"] = notes["gentle"]
+    if check["event"]:
+        if llm.choice_followed(check["event"], text, check["known"]):
+            seg["choice_check"] = "passed"
+        else:
+            text = f"{llm.bridge_sentence(check['event'], check['hero'])} {text}"
+            seg["choice_check"] = "bridged"
+    closing = ""
+    if check["goal"]:
+        if llm.goal_reached(check["goal"], text, check["hero"]):
+            seg["goal_check"] = "passed"
+        else:
+            closing = llm.goal_sentence(check["goal"])
+            seg["goal_check"] = "added"
+    budget = max(check["max_words"] - llm.word_count(closing), llm.minimum_words())
+    text, notes = llm.tidy_page(text, budget)
+    seg["trimmed_from"] = notes["trimmed_from"]
+    return f"{text} {closing}".strip() if closing else text
 
 
 def _choose_props(story: dict, seg: dict, text: str = "") -> None:
@@ -207,7 +229,9 @@ async def write_segment(story: dict, seg: dict) -> None:
             seg["beat"] = llm.page_beat(story, seg["index"] + 1, final)
             # A second try only when the reply has no usable page at all (broken, or under 15 words).
             for attempt in (1, 2):
-                check = {"event": event, "known": known, "hero": story.get("hero_name"), "earlier": earlier}
+                check = {"event": event, "known": known, "hero": story.get("hero_name"), "earlier": earlier,
+                         "max_words": level.max_words,
+                         "goal": (story.get("outline") or {}).get("goal_done") if final else None}
                 stream = llm.LLMStream(
                     messages=llm.build_messages(story, seg["action"], final, event=event),
                     schema=llm.response_schema(first, final, drawn_hero=bool(story.get("hero_description")), event=event,
@@ -243,9 +267,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                     page = llm.parse_page(raw, first, final, earlier_pages=earlier)
                     if not seg["text_complete"]:
                         seg["repeats_dropped"] = page.repeats_dropped
-                        if event and not llm.choice_followed(event, page.segment, known):
-                            page.segment = f"{llm.bridge_sentence(event, story.get('hero_name'))} {page.segment}"
-                            seg["choice_check"] = "bridged"
+                        page.segment = _final_touches(seg, page.segment, check)
                     break
                 except llm.WriterFailed as exc:
                     if seg["text_complete"]:
@@ -269,9 +291,7 @@ async def write_segment(story: dict, seg: dict) -> None:
                 if not llm.word_count(text):
                     _fail(story, seg, "writer_failed", problem)
                     return
-                if event and not llm.choice_followed(event, text, known):
-                    text = f"{llm.bridge_sentence(event, story.get('hero_name'))} {text}"
-                    seg["choice_check"] = "bridged"
+                text = _final_touches(seg, text, check)
                 log.warning("page check failed  %s  check=unusable  kept the longest text (%d words)",
                             where, llm.word_count(text))
                 page = llm.Page(
@@ -337,6 +357,14 @@ async def write_segment(story: dict, seg: dict) -> None:
                     llm.word_count(seg["text"]), level.min_words, level.max_words, level.key)
     if seg.get("repeats_dropped"):
         log.warning("page check failed  %s  check=repeat  sentences_dropped=%d", where, seg["repeats_dropped"])
+    if seg.get("gentle_fixed"):
+        log.warning("page check failed  %s  check=gentle  sentences_dropped_or_softened=%d", where, seg["gentle_fixed"])
+    if seg.get("trimmed_from"):
+        log.warning("page check failed  %s  check=length  trimmed from %d to %d words (level %s, at most %d)",
+                    where, seg["trimmed_from"], llm.word_count(seg["text"]), level.key, level.max_words)
+    if seg.get("goal_check") == "added":
+        log.warning("page check failed  %s  check=goal  (closing sentence added: %r)", where,
+                    llm.goal_sentence(story["outline"]["goal_done"]))
     if event:
         log.info(
             "choice check  %s  choice=%r  plan: setting=%r details=%s action=%s  result=%s",

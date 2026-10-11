@@ -188,6 +188,16 @@ def choice_followed(choice: str, page: str, known: str = "") -> bool:
     return bool(wanted & found)
 
 
+def goal_reached(goal_done: str, page: str, hero: str | None = None) -> bool:
+    """Stricter than choice_followed: the last page shows the quest's goal reached only when at
+    least half of the goal's main words (leaving out the hero's name) are on it."""
+    wanted = choice_words(goal_done) - {_stem(w) for w in re.findall(r"[A-Za-z']+", hero or "")}
+    if not wanted:
+        return True
+    found = {_stem(w) for w in re.findall(r"[A-Za-z']+", page)}
+    return len(wanted & found) * 2 >= len(wanted)
+
+
 def bridge_sentence(choice: str, hero: str | None) -> str:
     """A short opening that carries out the choice, for a page that ignored it twice.
     Offered choices start with a verb ("Open the door" -> "So Mira decided to open the door.");
@@ -263,6 +273,76 @@ def drop_repeats(text: str, earlier_pages: list[str], floor: int = 0,
     return result, dropped
 
 
+# Words that make a page not gentle. A sentence with one is dropped from the page (or, when that
+# would leave the page too short, the words are softened). Weapons (_WEAPON) count too.
+_ROUGH = re.compile(
+    r"\b(?:fight\w*|fought|battl\w*|attack\w*|wars?|hurt\w*|injur\w*|kill\w*|scar(?:y|ier|iest)|"
+    r"terrif\w*|horrif\w*|rag(?:e|es|ed|ing)|punch\w*|smash\w*|blood\w*|dead|death|die[sd]?|dying|"
+    r"evil|monsters?)\b", re.I)
+_SOFTER = {
+    "fight": "game", "fights": "games", "fighting": "playing", "fought": "played", "battle": "contest",
+    "battles": "contests", "attack": "rush", "attacked": "rushed", "attacks": "rushes", "war": "contest",
+    "wars": "contests", "hurt": "bumped", "scary": "surprising", "raging": "going on", "rage": "fuss",
+    "punch": "tap", "smash": "bump", "evil": "grumpy", "monster": "creature", "monsters": "creatures",
+}
+
+
+def not_gentle(text: str) -> bool:
+    return bool(_ROUGH.search(text) or _WEAPON.search(text))
+
+
+def soften(text: str) -> str:
+    """Rough words swapped for gentle ones, keeping a capital letter."""
+    def swap(match: re.Match) -> str:
+        word = match.group(0)
+        gentle = _SOFTER.get(word.lower(), "toy" if _WEAPON.fullmatch(word) else "trouble")
+        return gentle[0].upper() + gentle[1:] if word[0].isupper() else gentle
+    return _WEAPON.sub(swap, _ROUGH.sub(swap, text))
+
+
+def tidy_page(text: str, max_words: int, floor: int = 0) -> tuple[str, dict]:
+    """After the repeat filter, the last checks on a page's text, in this order:
+    1. gentle: sentences with a rough word are dropped while at least `floor` words remain; any
+       still left get their rough words softened.
+    2. length: whole sentences are kept up to `max_words` (the first sentence always stays).
+    Paragraphs are kept. Returns (text, {"gentle": sentences changed, "trimmed_from": words or 0})."""
+    blocks = [_SENTENCE_END.split(p.strip()) for p in text.split("\n\n") if p.strip()]
+    rough = sum(1 for b in blocks for x in b if not_gentle(x))
+    total = word_count(text)
+    changed = 0
+    if rough:
+        for b in blocks:
+            for i, sentence in enumerate(b):
+                if sentence and not_gentle(sentence):
+                    if total - word_count(sentence) >= floor:
+                        total -= word_count(sentence)
+                        b[i] = ""
+                    else:
+                        b[i] = soften(sentence)
+                    changed += 1
+    kept_blocks, used, trimmed_from = [], 0, 0
+    for b in blocks:
+        kept = []
+        for sentence in (x for x in b if x.strip()):
+            words = word_count(sentence)
+            if used and used + words > max_words:
+                trimmed_from = total
+                break
+            kept.append(sentence)
+            used += words
+        if kept:
+            kept_blocks.append(" ".join(kept))
+        if trimmed_from:
+            break
+    return "\n\n".join(kept_blocks), {"gentle": changed, "trimmed_from": trimmed_from}
+
+
+def goal_sentence(goal_done: str) -> str:
+    """The closing sentence added when the last page forgot to show the quest's goal achieved."""
+    line = clean_line(goal_done, 160).rstrip(".!? ")
+    return f"{line[0].upper()}{line[1:]}." if line else ""
+
+
 def hero_notes(description: str) -> tuple[str, list[str]]:
     """Split the vision description into the kind of character and a few short features, so the
     storyteller gets notes to use rather than a sentence to copy.
@@ -321,10 +401,15 @@ def build_outline_messages(story: dict) -> list[dict]:
         + hero_line +
         "Plan the story's quest. Use these JSON keys in this order:\n"
         '"hero_name": the hero\'s short, friendly name, 1 to 3 words.\n'
-        '"hero_kind": what kind of character the hero is, 1 to 3 words, with no colours or looks.\n'
+        '"hero_kind": the kind of animal, creature or person the hero is: a plain noun of 1 or 2 words, '
+        'never a nickname, a description or a colour.\n'
         '"goal": the quest: one special thing the hero wants to find, reach, make or help with, in at most 15 words.\n'
-        '"obstacle": the gentle problem in the way, in at most 15 words. Nobody is mean or hurt.\n'
-        '"friends": a list of 1 or 2 friends the hero meets, each with "name" (1 or 2 words) and "kind" (1 to 3 words).\n'
+        '"obstacle": the gentle problem in the way, in at most 15 words: bad weather, a tricky path, a '
+        'puzzle, something lost or stuck, or someone who needs help. Never a fight, a chase or anything '
+        'scary, and nobody is mean or hurt.\n'
+        '"friends": a list of 1 or 2 friends the hero meets, each with "name" (1 or 2 words) and "kind" '
+        '(the kind of animal, creature or person: a plain noun of 1 or 2 words).\n'
+        '"goal_done": the moment the goal is reached, in at most 15 words, naming anyone who is found or helped.\n'
         '"ending": the happy ending, in at most 20 words: the quest is completed.'
     )
     return [{"role": "system", "content": OUTLINE_SYSTEM}, {"role": "user", "content": user}]
@@ -342,6 +427,7 @@ def outline_schema() -> dict:
         "goal": {"type": "string"},
         "obstacle": {"type": "string"},
         "friends": {"type": "array", "items": friend, "minItems": 1, "maxItems": 2},
+        "goal_done": {"type": "string"},
         "ending": {"type": "string"},
     }
     return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
@@ -352,8 +438,36 @@ def _short(value, words: int) -> str:
     return " ".join(text.split()[:words])
 
 
+# Kinds that say nothing about what a character is ("Barky (buddy)").
+_VAGUE_KINDS = frozenset("""buddy friend helper pal hero companion sidekick guy boy girl kid character
+    good bestie mate partner""".split())
+# Gentle problems for when the model's obstacle is not gentle (one is picked per story).
+GENTLE_OBSTACLES = (
+    "a gusty wind has blown the way out of sight",
+    "a rainy puddle has turned the path into a slippery muddle",
+    "a tricky puzzle locks the way forward",
+    "the bridge is washed out by a big rain",
+    "something important is stuck up high",
+)
+
+
+def _vague(kind: str) -> bool:
+    words = [w for w in kind.lower().split() if w not in ("a", "an", "the")]
+    return not words or any(w in _VAGUE_KINDS for w in words)
+
+
+def kind_from_description(description: str) -> str:
+    """'a cartoon dog-like creature with ...' -> 'dog'; otherwise the last word of its kind."""
+    found = re.search(r"\b([a-z]+)-like\b", description, re.I)
+    if found:
+        return found.group(1).lower()
+    return hero_notes(description)[0].split()[-1].lower() if description.strip() else ""
+
+
 def parse_outline(raw: str, story: dict) -> dict:
-    """The model's outline, trimmed and checked. Raises WriterFailed when the quest is missing."""
+    """The model's outline, trimmed and checked. Raises WriterFailed when the quest is missing.
+    Not gentle: a rough obstacle is swapped for a gentle one and other rough words softened.
+    Vague kinds ("buddy", "good boy") give way to the drawing's kind, or to plain "friend"."""
     data = _loads_lenient(raw)
     if not isinstance(data, dict):
         raise WriterFailed("no outline in the reply")
@@ -367,23 +481,36 @@ def parse_outline(raw: str, story: dict) -> dict:
             continue
         name, kind = _short(item.get("name"), 2).strip("\"'"), _short(item.get("kind"), 3)
         if name and name.lower() != hero_name.lower() and name.lower() not in {f["name"].lower() for f in friends}:
-            friends.append({"name": name, "kind": kind or "friend"})
+            friends.append({"name": name, "kind": "friend" if _vague(kind) else soften(kind)})
+    hero_kind = _short(data.get("hero_kind"), 3)
+    if _vague(hero_kind or ""):
+        hero_kind = kind_from_description(story.get("hero_description") or "")
+    seed = sum(map(ord, story.get("id") or story.get("premise") or ""))
+    gentle = {"obstacle": False}
+    if not obstacle or not_gentle(obstacle):
+        gentle["obstacle"] = bool(obstacle)
+        obstacle = GENTLE_OBSTACLES[seed % len(GENTLE_OBSTACLES)]
+    goal_done = _short(data.get("goal_done"), 18) or f"{hero_name or 'the hero'} reaches the goal: {goal}"
     return {
         "hero_name": hero_name,
-        "hero_kind": _short(data.get("hero_kind"), 3) or "",
-        "goal": goal,
-        "obstacle": obstacle or "something tricky is in the way",
+        "hero_kind": soften(hero_kind or ""),
+        "goal": soften(goal),
+        "obstacle": obstacle,
         "friends": friends[:2],
-        "ending": ending,
+        "goal_done": soften(goal_done),
+        "ending": soften(ending),
         "pages": 4 if reading_level(story).key == "pre" else 6,
+        "softened": gentle["obstacle"] or any(not_gentle(x) for x in (goal, goal_done, ending)),
     }
 
 
 def fallback_outline(story: dict) -> dict:
     """When the outline call fails: a plain quest, so the pages still have beats to follow."""
     return {
-        "hero_name": "", "hero_kind": "", "goal": "a special adventure from the reader's idea",
+        "hero_name": "", "hero_kind": kind_from_description(story.get("hero_description") or ""),
+        "goal": "a special adventure from the reader's idea",
         "obstacle": "something tricky is in the way", "friends": [],
+        "goal_done": "the special adventure is complete",
         "ending": "the adventure ends happily and everyone celebrates together",
         "pages": 4 if reading_level(story).key == "pre" else 6, "fallback": True,
     }
@@ -444,6 +571,18 @@ def _outline_lines(story: dict) -> str:
     )
 
 
+def _choices_key(next_beat: str) -> str:
+    return _CHOICES_KEY + f"  The next page will be about this, so each choice is a different way toward it: {next_beat}\n"
+
+
+def must_show(story: dict, event: str | None, final: bool) -> str:
+    """The prompt's last line: the reader's choice, and on the last page the quest's goal reached."""
+    goal = (story.get("outline") or {}).get("goal_done") if final else ""
+    if event and goal:
+        return f"{event}, and then {goal}"
+    return event or goal or ""
+
+
 def build_messages(story: dict, action: str | None, final: bool, event: str | None = None) -> list[dict]:
     """Build the chat messages for the next page. Sends a compact summary plus only the
     most recent page, never the whole history, so the 2048-token context is not exceeded."""
@@ -474,6 +613,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
                 "or uses things that are in these notes.\n"
                 + weapon_rule(f"{hero} {who or ''}") + "\n"
             )
+        next_beat = page_beat(story, 2, final=pages <= 2)
         name_line = (f"The hero's name: {outline['hero_name']}\n"
                      if outline.get("hero_name") and not hero else "")
         user = (
@@ -493,7 +633,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             '"character_look": what the main character looks like in at most 20 words '
             "(kind of creature or person, colours, size, clothing).\n"
             '"world": the setting in at most 20 words.\n'
-            + _COMMON_KEYS + _CHOICES_KEY + _SUMMARY_KEY
+            + _COMMON_KEYS + _choices_key(next_beat) + _SUMMARY_KEY
         )
     else:
         # Only a short summary: the previous page's text would drown out the reader's choice (which a
@@ -514,7 +654,7 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
                 "the reader decides what happens next. Do not end the story."
                 + (" The story ends on the next page, so lead toward the happy ending." if near_end else "")
             )
-            choices_key = _CHOICES_KEY
+            choices_key = _choices_key(page_beat(story, page_number + 1, final=page_number + 1 >= pages))
         decision = action or "Continue the adventure in the most natural way."
         user = (
             f"Story title: {story.get('title') or 'Untitled'}\n"
@@ -547,8 +687,9 @@ def build_messages(story: dict, action: str | None, final: bool, event: str | No
             f'"segment": the text of page {page_number}, written from the plan above: '
             f'{level.min_words} to {level.max_words} words in one or two short paragraphs.\n'
             + _COMMON_KEYS + choices_key + _SUMMARY_KEY
-            # Last, because a small model follows the last instruction best.
-            + (f"\n\nThis page must show: {event}" if event else "")
+            # Last, because a small model follows the last instruction best. On the last page the
+            # quest's goal is reached there too ("the lost puppy is found and named").
+            + (f"\n\nThis page must show: {must_show(story, event, final)}" if event or final else "")
         )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -1090,6 +1231,7 @@ def parse_page(raw: str, first: bool, final: bool, earlier_pages: list[str] | No
             if not isinstance(item, str):
                 continue
             choice = clean_line(re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", item), 80).rstrip(".")
+            choice = choice[:1].upper() + choice[1:]
             key = choice.lower()
             if len(choice) >= 3 and key not in seen:
                 seen.add(key)
